@@ -1,26 +1,13 @@
 [input.mysql]
-host = "test.daoway.cn"
+host = "localhost"
 port = 3306
 username = "root"
-password = "Daoway_Mysql_iO12"
+password = "******"
 
-[output.mysql]
-host = "test.daoway.cn"
-port = 3306
-username = "root"
-password = "Daoway_Mysql_iO12"
-database = "daowei"
-
-[output.starrocks]
-host = "123.57.239.113"
-port = 8040
-username = "root"
-password = "Daoway_Mysql_iO12"
-database = "daowei"
 
 [output.meilisearch]
-origin = "http://39.107.230.75"
-admin_api_key = "f51edcf9771d8ee848fc8d7a66655f10c60a02ff604db63bd990461405877db3"
+origin = "http://localhost:7700"
+admin_api_key = "******"
 
 
 
@@ -29,6 +16,6 @@ input= "daowei"
 output= "daowei"
 
 [[filter.tables]]
-input= "daowei.technician"
-output = "daowei.technician"
-primarykey= "dwid"
+input= "daowei.user"
+output = "daowei.user"
+primarykey= ["id"]
