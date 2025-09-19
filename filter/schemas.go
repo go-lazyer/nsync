@@ -15,7 +15,6 @@ func NewSchemas(conf []config.Schema) (*Schemas, error) {
 		schemas[schema.Input] = schema.Output
 	}
 	return &Schemas{schemas}, nil
-
 }
 func (f *Schemas) Apply(event *input.Event) bool {
 	if len(f.schemas) == 0 {

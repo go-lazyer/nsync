@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-lazyer/nsync/cleaning"
 	"github.com/go-lazyer/nsync/config"
 	"github.com/go-lazyer/nsync/filter"
 	"github.com/go-lazyer/nsync/input"
@@ -43,11 +44,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to init  output: %v", err)
 	}
+	cleaning := cleaning.NewCleaning()
 
 	// 创建处理器,真实处理数据的
 	processor := processor.NewProcessor(
 		input,
 		filterChain,
+		cleaning,
 		output,
 	)
 	// 创建上下文用于优雅关机
