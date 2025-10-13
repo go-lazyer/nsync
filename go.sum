@@ -13,6 +13,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/go-lazyer/north v0.1.1 h1:0S3j4cA/kT8T7J6UccZPbVhaSTBS6rMknaf8cat0BOI=
 github.com/go-lazyer/north v0.1.1/go.mod h1:cLkfDx9PlDmydX8umDESbWY19mDsdYpoySZrCbHEyGE=
+github.com/go-lazyer/north v0.1.2 h1:A4i7XIUYaZlpOz+T9rDrpwCTpkwUwizdqDYziG3nZv4=
+github.com/go-lazyer/north v0.1.2/go.mod h1:cLkfDx9PlDmydX8umDESbWY19mDsdYpoySZrCbHEyGE=
 github.com/go-mysql-org/go-mysql v1.11.0 h1:Y0ooXu2UtbjsgpfjFBXZEvidEl1q8n0ESxej0zZ78Zc=
 github.com/go-mysql-org/go-mysql v1.11.0/go.mod h1:y/7aggbs+Io8rPVerIjTe1+nMgt8q5tBIxIc+qQnE0k=
 github.com/go-sql-driver/mysql v1.9.3 h1:U/N249h2WzJ3Ukj8SowVFjdtZKfu9vlLZxjPXV1aweo=
