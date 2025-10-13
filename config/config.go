@@ -28,6 +28,15 @@ type OutputMysql struct {
 	Password string `toml:"password"`
 	Database string `toml:"database"`
 }
+
+type OutputManticore struct {
+	Host     string `toml:"host"`
+	Port     int    `toml:"port"`
+	Username string `toml:"username"`
+	Password string `toml:"password"`
+	Database string `toml:"database"`
+}
+
 type OutputStarrocks struct {
 	Host     string `toml:"host"`
 	Port     int    `toml:"port"`
@@ -44,20 +53,20 @@ type OutputConfig struct {
 	Mysql       OutputMysql       `toml:"mysql"`
 	Starrocks   OutputStarrocks   `toml:"starrocks"`
 	MeiliSearch OutputMeiliSearch `toml:"meilisearch"`
+	Manticore   OutputManticore   `toml:"manticore"`
 }
 
-type Schema struct {
+type Database struct {
 	Input  string `toml:"input"`
 	Output string `toml:"output"`
 }
 type Table struct {
-	Input      string   `toml:"input"`
-	Output     string   `toml:"output"`
-	PrimaryKey []string `toml:"primarykey"`
+	Input  string `toml:"input"`
+	Output string `toml:"output"`
 }
 type Filter struct {
-	Schemas []Schema `toml:"schemas"`
-	Tables  []Table  `toml:"tables"`
+	Databases []Database `toml:"databases"`
+	Tables    []Table    `toml:"tables"`
 }
 
 type Config struct {

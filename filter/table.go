@@ -12,21 +12,21 @@ type Tables struct {
 	tables map[string]config.Table // key: input schema.table, value: output schema.table
 }
 
-func NewTables(conf []config.Table) (*Tables, error) {
+func NewTables(conf *config.Config) (*Tables, error) {
 	tables := make(map[string]config.Table, 0)
 
-	for _, table := range conf {
+	for _, table := range conf.Filter.Tables {
 		if !strings.Contains(table.Input, ".") {
 			return nil, fmt.Errorf("table input %s is not valid, it should be in the format of schema.table", table.Input)
-		}
-		if len(table.PrimaryKey) == 0 {
-			return nil, fmt.Errorf("table %s primary key is empty", table.Input)
 		}
 		if !strings.Contains(table.Output, ".") {
 			return nil, fmt.Errorf("table output %s is not valid, it should be in the format of schema.table", table.Output)
 		}
 		tables[table.Input] = table
 	}
+
+
+	
 	return &Tables{tables}, nil
 }
 
@@ -42,6 +42,5 @@ func (f *Tables) Apply(event *input.Event) bool {
 	value := strings.Split(table.Output, ".")
 	event.Schema = value[0]
 	event.Table = value[1]
-	event.PrimaryKey = table.PrimaryKey
 	return true
 }

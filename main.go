@@ -20,7 +20,7 @@ import (
 
 func main() {
 	var configPath string
-	flag.StringVar(&configPath, "config", "./config.toml", "path to config file")
+	flag.StringVar(&configPath, "config", "./nsync.toml", "path to config file")
 	flag.Parse()
 
 	// 加载配置
@@ -35,16 +35,18 @@ func main() {
 	}
 
 	// 初始化过滤器链
-	filterChain, err := filter.NewChain(&cfg.Filter)
+	filterChain, err := filter.NewChain(cfg)
 	if err != nil {
 		log.Fatalf("Failed to init filter: %v", err)
 	}
+
+	// 初始化清洗器
+	cleaning := cleaning.NewCleaning()
 
 	output, err := output.NewOutput(&cfg.Output)
 	if err != nil {
 		log.Fatalf("Failed to init  output: %v", err)
 	}
-	cleaning := cleaning.NewCleaning()
 
 	// 创建处理器,真实处理数据的
 	processor := processor.NewProcessor(

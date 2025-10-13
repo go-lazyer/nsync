@@ -12,6 +12,7 @@ import (
 	"log"
 
 	"github.com/go-lazyer/nsync/config"
+	"github.com/go-lazyer/nsync/constant"
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -140,28 +141,68 @@ type EventHandler struct {
 // ⚡️ 触发场景：每当有DML操作时，携带变更前后的行数据（e.Rows）
 func (h *EventHandler) OnRow(e *canal.RowsEvent) error {
 	columns := make([]string, 0)
+	types := make([]string, 0)
 	for _, column := range e.Table.Columns {
 		columns = append(columns, column.Name)
+		t := strings.Split(column.RawType, "(")[0]
+		if _, ok := constant.ColumnTypes[t]; ok {
+			types = append(types, t)
+		} else {
+			types = append(types, "varchar")
+		}
 	}
-	event := &Event{
-		Schema:       e.Table.Schema,
-		Table:        e.Table.Name,
-		SourceSchema: e.Table.Schema,
-		SourceTable:  e.Table.Name,
-		Action:       e.Action,
-		Rows:         e.Rows,
-		Columns:      columns,
-		Position:     h.binlogGTID,
-	}
-	// 发送到通道（带上下文超时控制）
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	beforeRows := make([][]any, 0)
+	afterRows := make([][]any, 0)
 
-	select {
-	case h.input.event <- event:
-	case <-ctx.Done():
-		return ctx.Err()
+	var count int = 0
+	switch e.Action {
+	case canal.UpdateAction:
+		for n, row := range e.Rows {
+			if n%2 == 0 {
+				beforeRows = append(beforeRows, row)
+			} else {
+				afterRows = append(afterRows, row)
+			}
+		}
+		count = len(e.Rows) / 2
+	case canal.InsertAction:
+		afterRows = e.Rows
+		count = len(e.Rows)
+	default:
+		beforeRows = e.Rows
+		count = len(e.Rows)
 	}
+
+	for i := 0; i < count; i++ {
+		event := &Event{
+			Schema:       e.Table.Schema,
+			Table:        e.Table.Name,
+			SourceSchema: e.Table.Schema,
+			SourceTable:  e.Table.Name,
+			Action:       e.Action,
+			Position:     h.binlogGTID,
+			Columns:      columns,
+			ColumnPkeys:  e.Table.PKColumns,
+			ColumnTypes:  types,
+		}
+		if len(beforeRows) > i {
+			event.BeforeRow = beforeRows[i]
+		}
+		if len(afterRows) > i {
+			event.AfterRow = afterRows[i]
+		}
+
+		// 发送到通道（带上下文超时控制）
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		select {
+		case h.input.event <- event:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	return nil
 }
 

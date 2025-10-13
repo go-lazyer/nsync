@@ -12,11 +12,21 @@ type Event struct {
 	SourceTable  string // 源数据库的Table
 	Schema       string
 	Table        string
-	PrimaryKey   []string // 主键
 	Columns      []string // 列名
+	ColumnPkeys  []int    // 主键下标
+	ColumnTypes  []string // 列名类型
 	Action       string   // insert/update/delete
-	Rows         [][]any
+	BeforeRow    []any
+	AfterRow     []any
 	Position     string // 事件位置
+}
+
+func (e *Event) GetKeysByColumns(columns ...string) map[string]int {
+	colIndex := make(map[string]int)
+	for i, col := range e.Columns {
+		colIndex[col] = i
+	}
+	return colIndex
 }
 
 type Input interface {

@@ -37,19 +37,20 @@ func (p *Processor) Run(ctx context.Context) error {
 		if !p.filter.Apply(event) {
 			continue
 		}
-		err := p.cleaning.Cleaning(event)
+		events, err := p.cleaning.Cleaning(event)
 		if err != nil {
 			log.Fatal("Failed to buffer event:", err)
 			return err
 		}
-
-		savePosition, err := p.output.Buffer(event)
-		if err != nil {
-			log.Fatal("Failed to buffer event:", err)
-			return err
-		}
-		if savePosition != "" {
-			p.input.SavePosition(savePosition)
+		for _, event := range events {
+			savePosition, err := p.output.Buffer(&event)
+			if err != nil {
+				log.Fatal("Failed to buffer event:", err)
+				return err
+			}
+			if savePosition != "" {
+				p.input.SavePosition(savePosition)
+			}
 		}
 	}
 	return nil

@@ -1,11 +1,14 @@
 package cleaning
 
 import (
+	"fmt"
+
 	"github.com/go-lazyer/nsync/input"
 )
 
 type Cleaner interface {
-	Cleaning(event *input.Event) bool // 返回true表示继续处理，false表示丢弃
+	Name() string
+	Cleaning(event *input.Event) ([]input.Event, error)
 }
 
 // 数据清洗
@@ -17,14 +20,20 @@ func NewCleaning() *Cleaning {
 	return &Cleaning{}
 }
 
-func (p *Cleaning) Cleaning(event *input.Event) error {
+func (p *Cleaning) AddCleaner(cleaner Cleaner) {
+	if p.cleaners == nil {
+		p.cleaners = make(map[string]Cleaner)
+	}
+	p.cleaners[cleaner.Name()] = cleaner
+
+}
+func (p *Cleaning) Cleaning(event *input.Event) ([]input.Event, error) {
 	if len(p.cleaners) == 0 {
-		return nil
+		return []input.Event{*event}, nil
 	}
-	cleaner := p.cleaners[event.SourceTable]
+	cleaner := p.cleaners[fmt.Sprintf("%s.%s", event.SourceSchema, event.SourceTable)]
 	if cleaner == nil {
-		return nil
+		return []input.Event{*event}, nil
 	}
-	cleaner.Cleaning(event)
-	return nil
+	return cleaner.Cleaning(event)
 }

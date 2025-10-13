@@ -1,0 +1,43 @@
+[input.mysql]
+host = "localhost"
+port = 3306
+username = "root"
+password = "******"
+
+
+[output.mysql]
+host = "localhost"
+port = 3306
+username = "root"
+password = "******"
+database = "daowei"
+
+
+[output.manticore]
+host = "localhost"
+port = 9306
+username = "root"
+password = "******"
+database = "Manticore"
+
+[output.starrocks]
+host = "localhost"
+port = 8040
+username = "root"
+password = "******"
+database = "daowei"
+
+[output.meilisearch]
+origin = "http://localhost:7700"
+admin_api_key = "******"
+
+
+
+[[filter.schemas]]
+input= "test"
+output= "test"
+
+[[filter.tables]]
+input= "test.user"
+output = "test.user"
+

@@ -20,18 +20,18 @@ type Chain struct {
 	lock    sync.RWMutex
 }
 
-func NewChain(cfg *config.Filter) (*Chain, error) {
+func NewChain(cfg *config.Config) (*Chain, error) {
 
 	chain := Chain{
 		filters: make([]Filter, 0),
 	}
-	schemas, err := NewSchemas(cfg.Schemas)
+	schemas, err := NewDatabases(cfg.Filter.Databases)
 	if err != nil {
 		return &chain, err
 	}
 	chain.Add(schemas)
 
-	tables, err := NewTables(cfg.Tables)
+	tables, err := NewTables(cfg)
 	if err != nil {
 		return &chain, err
 	}

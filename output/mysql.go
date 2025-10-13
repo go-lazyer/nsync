@@ -135,7 +135,7 @@ func (mysql *MysqlOutput) Close() error {
 
 // updateEvent 单条更新事件
 func (mysql *MysqlOutput) updateEvent(tx *sql.Tx, event *input.Event) error {
-	if event == nil || len(event.Rows) == 0 {
+	if event == nil || len(event.AfterRow) == 0 {
 		return nil
 	}
 
@@ -191,7 +191,7 @@ func (mysql *MysqlOutput) updateEvent(tx *sql.Tx, event *input.Event) error {
 	return nil
 }
 func (mysql *MysqlOutput) insertEvent(tx *sql.Tx, event *input.Event) error {
-	if event == nil || len(event.Rows) == 0 {
+	if event == nil || len(event.AfterRow) == 0 {
 		return nil
 	}
 	columns := event.Columns
@@ -207,24 +207,15 @@ func (mysql *MysqlOutput) insertEvent(tx *sql.Tx, event *input.Event) error {
 	valuePlaceholders := make([]string, 0) // 每一行的 (?, ?, ...)
 	args := make([]interface{}, 0)         // 预分配，避免频繁扩容
 
-	// 遍历每个 event
-	// 检查 event 是否有数据行
-	if len(event.Rows) == 0 {
-		return nil
+	// 为每一行创建 (?, ?, ...)
+	placeholders := make([]string, len(event.AfterRow))
+	for i := range placeholders {
+		placeholders[i] = "?"
 	}
+	valuePlaceholders = append(valuePlaceholders, "("+strings.Join(placeholders, ",")+")")
 
-	for _, row := range event.Rows {
-
-		// 为每一行创建 (?, ?, ...)
-		placeholders := make([]string, len(row))
-		for i := range placeholders {
-			placeholders[i] = "?"
-		}
-		valuePlaceholders = append(valuePlaceholders, "("+strings.Join(placeholders, ",")+")")
-
-		// 将这一行的所有值加入 args
-		args = append(args, row...)
-	}
+	// 将这一行的所有值加入 args
+	args = append(args, event.AfterRow...)
 
 	// 如果没有要插入的数据
 	if len(valuePlaceholders) == 0 {
@@ -246,7 +237,7 @@ func (mysql *MysqlOutput) insertEvent(tx *sql.Tx, event *input.Event) error {
 
 // deleteEvent 单条删除事件
 func (mysql *MysqlOutput) deleteEvent(tx *sql.Tx, event *input.Event) error {
-	if event == nil || len(event.Rows) == 0 {
+	if event == nil || len(event.BeforeRow) == 0 {
 		return nil
 	}
 
@@ -260,23 +251,16 @@ func (mysql *MysqlOutput) deleteEvent(tx *sql.Tx, event *input.Event) error {
 	valuePlaceholders := make([]string, 0)
 	args := make([]interface{}, 0) // 预分配容量
 
-	// 检查是否有行数据
-	if len(event.Rows) == 0 {
-		return nil
-	}
-
 	// 检查每行的列数是否匹配
-	for _, row := range event.Rows {
-		// 为每一行生成 (?, ?, ...)
-		placeholders := make([]string, len(row))
-		for i := range placeholders {
-			placeholders[i] = "?"
-		}
-		valuePlaceholders = append(valuePlaceholders, "("+strings.Join(placeholders, ",")+")")
-
-		// 将这一行的值加入 args
-		args = append(args, row...)
+	// 为每一行生成 (?, ?, ...)
+	placeholders := make([]string, len(event.BeforeRow))
+	for i := range placeholders {
+		placeholders[i] = "?"
 	}
+	valuePlaceholders = append(valuePlaceholders, "("+strings.Join(placeholders, ",")+")")
+
+	// 将这一行的值加入 args
+	args = append(args, event.BeforeRow...)
 
 	// 如果没有要删除的条件
 	if len(valuePlaceholders) == 0 {

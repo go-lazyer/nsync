@@ -24,14 +24,15 @@ type Output interface {
 }
 
 func NewOutput(cfg *config.OutputConfig) (Output, error) {
-	// if !reflect.ValueOf(cfg.Postgresql).IsZero() {
-	// 	// 2. 创建输入实例
-	// 	output := &PostgresqlOutput{}
+	if !reflect.ValueOf(cfg.Manticore).IsZero() {
+		// 2. 创建输入实例
+		output := &ManticoreOutput{}
 
-	// 	err := output.NewOutput(cfg)
+		err := output.NewOutput(cfg)
 
-	// 	return output, err
-	// }
+		return output, err
+	}
+
 	if !reflect.ValueOf(cfg.MeiliSearch).IsZero() {
 		// 2. 创建输入实例
 		output := &MeiliSearchOutput{}
