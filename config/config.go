@@ -30,11 +30,19 @@ type OutputMysql struct {
 }
 
 type OutputManticore struct {
-	Host     string `toml:"host"`
-	Port     int    `toml:"port"`
-	Username string `toml:"username"`
-	Password string `toml:"password"`
-	Database string `toml:"database"`
+	Host      string `toml:"host"`
+	Port      int    `toml:"port"`
+	HttpPort  int    `toml:"http_port"`
+	Username  string `toml:"username"`
+	Password  string `toml:"password"`
+	Database  string `toml:"database"`
+	BatchSize int    `toml:"batch_size"`
+}
+type OutputTypesense struct {
+	Host      string `toml:"host"`
+	Port      int    `toml:"port"`
+	Apikey    string `toml:"apikey"`
+	BatchSize int    `toml:"batch_size"`
 }
 
 type OutputStarrocks struct {
@@ -54,6 +62,7 @@ type OutputConfig struct {
 	Starrocks   OutputStarrocks   `toml:"starrocks"`
 	MeiliSearch OutputMeiliSearch `toml:"meilisearch"`
 	Manticore   OutputManticore   `toml:"manticore"`
+	Typesense   OutputTypesense   `toml:"typesense"`
 }
 
 type Database struct {

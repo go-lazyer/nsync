@@ -28,16 +28,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
-	// 初始化输入源
-	input, err := input.NewInput(&cfg.Input)
-	if err != nil {
-		log.Fatalf("Failed to init input: %v", err)
-	}
 
 	// 初始化过滤器链
-	filterChain, err := filter.NewChain(cfg)
+	filterChain, err := filter.NewChain(&cfg.Filter)
 	if err != nil {
 		log.Fatalf("Failed to init filter: %v", err)
+	}
+
+	// 初始化输入源
+	input, err := input.NewInput(&cfg.Input, filterChain)
+	if err != nil {
+		log.Fatalf("Failed to init input: %v", err)
 	}
 
 	// 初始化清洗器
@@ -51,7 +52,6 @@ func main() {
 	// 创建处理器,真实处理数据的
 	processor := processor.NewProcessor(
 		input,
-		filterChain,
 		cleaning,
 		output,
 	)

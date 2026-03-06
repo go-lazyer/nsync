@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-lazyer/nsync/config"
 	"github.com/go-lazyer/nsync/constant"
+	"github.com/go-lazyer/nsync/filter"
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -20,27 +21,41 @@ import (
 
 const POSITION_FILE_NAME = "_mysql_binlog_gtid_position.info"
 
+var POSITION_GTID string = ""
+
 type MysqlInput struct {
-	canal *canal.Canal
-	event chan *Event
-	once  sync.Once
+	canal  *canal.Canal
+	event  chan *Event
+	once   sync.Once
+	filter *filter.Chain
 }
 
-func NewMysqlInput(cfg *config.InputConfig) (*MysqlInput, error) {
+func NewMysqlInput(cfg *config.InputConfig, filter *filter.Chain) (*MysqlInput, error) {
 	// 1. 初始化 Canal 配置
-	c, err := canal.NewCanal(&canal.Config{
-		ServerID: 128, // 必须设置有效 ServerID
-		Addr:     cfg.Mysql.Host + ":" + strconv.Itoa(cfg.Mysql.Port),
-		User:     cfg.Mysql.Username,
-		Password: cfg.Mysql.Password,
-		Flavor:   "mysql", // 明确指定数据库类型
-	})
+	// &canal.Config{
+	// 	ServerID:        uint32(rand.New(rand.NewSource(time.Now().Unix())).Intn(1000)) + 1001, // 必须设置有效 ServerID
+	// 	Addr:            cfg.Mysql.Host + ":" + strconv.Itoa(cfg.Mysql.Port),
+	// 	User:            cfg.Mysql.Username,
+	// 	Password:        cfg.Mysql.Password,
+	// 	Flavor:          "mysql", // 明确指定数据库类型
+	// 	HeartbeatPeriod: 200 * time.Millisecond,
+	// 	ReadTimeout:     300 * time.Millisecond,
+	// }
+
+	cf := canal.NewDefaultConfig()
+	cf.Addr = cfg.Mysql.Host + ":" + strconv.Itoa(cfg.Mysql.Port)
+	cf.User = cfg.Mysql.Username
+	cf.Password = cfg.Mysql.Password
+	cf.Dump.ExecutionPath = "" // ignore mysqldump, use binlog only
+
+	c, err := canal.NewCanal(cf)
 	if err != nil {
 		return nil, err
 	}
 	mysqlInput := &MysqlInput{
-		canal: c,
-		event: make(chan *Event, 1024),
+		canal:  c,
+		event:  make(chan *Event, 2048),
+		filter: filter,
 	}
 	handler := &EventHandler{
 		input: mysqlInput,
@@ -78,8 +93,7 @@ func NewMysqlInput(cfg *config.InputConfig) (*MysqlInput, error) {
 			err = c.StartFromGTID(gs)
 		}
 		if err != nil {
-			fmt.Printf("mysql canal run error:%v\n", err)
-			close(mysqlInput.event)
+			panic(fmt.Sprintf("mysql canal run error:%v\n", err))
 		}
 	}()
 	return mysqlInput, nil
@@ -93,8 +107,17 @@ func (i *MysqlInput) CloseEvent() {
 		close(i.event)
 	})
 }
+
 func (i *MysqlInput) SavePosition(position string) error {
-	position = strings.ReplaceAll(position, ":", ":1-")
+	if POSITION_GTID == "" { //表示系统刚启动
+		POSITION_GTID = position
+		return nil
+	}
+	if POSITION_GTID == position { //事务未完成 内多条语句，位置未变更，
+		return nil
+	}
+	// p := strings.ReplaceAll(POSITION_GTID, ":", ":1-")
+	POSITION_GTID = position
 	return os.WriteFile(POSITION_FILE_NAME, []byte(position), 0644)
 }
 
@@ -140,17 +163,23 @@ type EventHandler struct {
 // 📌 核心方法：处理数据变更事件（INSERT/UPDATE/DELETE）
 // ⚡️ 触发场景：每当有DML操作时，携带变更前后的行数据（e.Rows）
 func (h *EventHandler) OnRow(e *canal.RowsEvent) error {
-	columns := make([]string, 0)
-	types := make([]string, 0)
-	for _, column := range e.Table.Columns {
-		columns = append(columns, column.Name)
+	schema, table, ok := h.input.filter.Apply(e.Table.Schema, e.Table.Name)
+	if !ok {
+		return nil
+	}
+
+	columns := make([]string, len(e.Table.Columns))
+	types := make([]string, len(e.Table.Columns))
+	for n, column := range e.Table.Columns {
+		columns[n] = column.Name
 		t := strings.Split(column.RawType, "(")[0]
-		if _, ok := constant.ColumnTypes[t]; ok {
-			types = append(types, t)
+		if v, ok := constant.MysqlColumnType[t]; ok {
+			types[n] = v
 		} else {
-			types = append(types, "varchar")
+			types[n] = constant.COLUMN_TYPE_STRING
 		}
 	}
+
 	beforeRows := make([][]any, 0)
 	afterRows := make([][]any, 0)
 
@@ -172,19 +201,19 @@ func (h *EventHandler) OnRow(e *canal.RowsEvent) error {
 		beforeRows = e.Rows
 		count = len(e.Rows)
 	}
-
 	for i := 0; i < count; i++ {
 		event := &Event{
-			Schema:       e.Table.Schema,
-			Table:        e.Table.Name,
-			SourceSchema: e.Table.Schema,
-			SourceTable:  e.Table.Name,
-			Action:       e.Action,
-			Position:     h.binlogGTID,
-			Columns:      columns,
-			ColumnPkeys:  e.Table.PKColumns,
-			ColumnTypes:  types,
+			SourceDatabase: e.Table.Schema,
+			SourceTable:    e.Table.Name,
+			Database:       schema,
+			Table:          table,
+			Action:         e.Action,
+			Position:       h.binlogGTID,
+			Columns:        append([]string(nil), columns...), // 深拷贝列名切片
+			ColumnPkeys:    e.Table.PKColumns,
+			ColumnTypes:    append([]string(nil), types...), // 深拷贝列类型切片
 		}
+
 		if len(beforeRows) > i {
 			event.BeforeRow = beforeRows[i]
 		}
@@ -195,10 +224,11 @@ func (h *EventHandler) OnRow(e *canal.RowsEvent) error {
 		// 发送到通道（带上下文超时控制）
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-
 		select {
 		case h.input.event <- event:
 		case <-ctx.Done():
+			log.Printf("Event send timeout, action: %s, table: %s, schema: %s, channel length: %d, channel capacity: %d",
+				event.Action, event.Table, event.Database, len(h.input.event), cap(h.input.event))
 			return ctx.Err()
 		}
 	}
@@ -222,6 +252,7 @@ func (h *EventHandler) OnGTID(header *replication.EventHeader, gtidEvent mysql.B
 		return err
 	}
 	h.binlogGTID = gtid.String()
+	// log.Printf("OnGTID synced: %s, GTID", gtid.String())
 	return nil
 }
 
@@ -234,7 +265,9 @@ func (h *EventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Po
 	// h.input.binlogName = pos.Name
 	// h.input.binlogPos = pos.Pos
 	// h.input.binlogGTID = set.String()
-	// log.Printf("Position synced: %s, GTID: %v", set.String(), force)
+	// log.Printf("OnPosSynced synced:  Pos: %v", pos.Pos)
+	h.binlogGTID = set.String()
+	// log.Printf("OnPosSynced synced: %s, GTID: %v", set.String(), force)
 	return nil
 }
 func (h *EventHandler) String() string {

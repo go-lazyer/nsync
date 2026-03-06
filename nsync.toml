@@ -16,9 +16,17 @@ database = "daowei"
 [output.manticore]
 host = "localhost"
 port = 9306
+http_port = 9308
 username = "root"
 password = "******"
 database = "Manticore"
+batch_size = 1000
+
+[output.typesense]
+host = "localhost"
+port = 8108
+apikey = "******"
+batch_size = 1000
 
 [output.starrocks]
 host = "localhost"
@@ -33,7 +41,7 @@ admin_api_key = "******"
 
 
 
-[[filter.schemas]]
+[[filter.databases]]
 input= "test"
 output= "test"
 

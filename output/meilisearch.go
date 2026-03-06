@@ -106,7 +106,7 @@ func (meiliSearch *MeiliSearchOutput) insertCsvEvent(event *input.Event) error {
 	// 写入列名"id:number","title:string","genres:string","release-year:number"
 	columns := make([]string, len(event.Columns))
 	for i, column := range event.Columns {
-		columns[i] = fmt.Sprintf("%s:%s", column, constant.ColumnTypes[event.ColumnTypes[i]].Meilisearch)
+		columns[i] = fmt.Sprintf("%s:%s", column, constant.NsyncColumnTypes[event.ColumnTypes[i]].Meilisearch)
 	}
 	builder.WriteString(strings.Join(columns, PLACE_HOLDER_GO) + "\n")
 
@@ -145,7 +145,7 @@ func (meiliSearch *MeiliSearchOutput) updateCsvEvent(event *input.Event) error {
 	// 写入字符串
 	columns := make([]string, len(event.Columns))
 	for i, column := range event.Columns {
-		columns[i] = fmt.Sprintf("%s:%s", column, constant.ColumnTypes[event.ColumnTypes[i]].Meilisearch)
+		columns[i] = fmt.Sprintf("%s:%s", column, constant.NsyncColumnTypes[event.ColumnTypes[i]].Meilisearch)
 	}
 	builder.WriteString(strings.Join(columns, PLACE_HOLDER_GO) + "\n")
 

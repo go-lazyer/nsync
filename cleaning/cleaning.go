@@ -31,7 +31,7 @@ func (p *Cleaning) Cleaning(event *input.Event) ([]input.Event, error) {
 	if len(p.cleaners) == 0 {
 		return []input.Event{*event}, nil
 	}
-	cleaner := p.cleaners[fmt.Sprintf("%s.%s", event.SourceSchema, event.SourceTable)]
+	cleaner := p.cleaners[fmt.Sprintf("%s.%s", event.SourceDatabase, event.SourceTable)]
 	if cleaner == nil {
 		return []input.Event{*event}, nil
 	}

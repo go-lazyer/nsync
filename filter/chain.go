@@ -4,12 +4,11 @@ import (
 	"sync"
 
 	"github.com/go-lazyer/nsync/config"
-	"github.com/go-lazyer/nsync/input"
 )
 
 // Filter 处理接口
 type Filter interface {
-	Apply(event *input.Event) bool // 返回true表示继续处理，false表示丢弃
+	Apply(database, table string) (string, string, bool) // 返回true表示继续处理，false表示丢弃
 }
 
 // Event 包含处理所需的数据结构
@@ -20,18 +19,18 @@ type Chain struct {
 	lock    sync.RWMutex
 }
 
-func NewChain(cfg *config.Config) (*Chain, error) {
+func NewChain(filter *config.Filter) (*Chain, error) {
 
 	chain := Chain{
 		filters: make([]Filter, 0),
 	}
-	schemas, err := NewDatabases(cfg.Filter.Databases)
+	schemas, err := NewDatabases(filter.Databases)
 	if err != nil {
 		return &chain, err
 	}
 	chain.Add(schemas)
 
-	tables, err := NewTables(cfg)
+	tables, err := NewTables(filter)
 	if err != nil {
 		return &chain, err
 	}
@@ -44,11 +43,14 @@ func (c *Chain) Add(filter Filter) {
 	c.filters = append(c.filters, filter)
 }
 
-func (c *Chain) Apply(event *input.Event) bool {
+func (c *Chain) Apply(database, table string) (string, string, bool) {
+	var outputDatabase, outputTable string
+	var ok bool
 	for _, f := range c.filters {
-		if !f.Apply(event) {
-			return false
+		outputDatabase, outputTable, ok = f.Apply(database, table)
+		if !ok {
+			return outputDatabase, outputTable, ok
 		}
 	}
-	return true
+	return outputDatabase, outputTable, true
 }

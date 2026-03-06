@@ -10,9 +10,9 @@ import (
 
 const (
 	// 批量大小
-	DefaultMaxBatchSize = 1
+	DefaultMaxBatchSize = 100
 	// 批量等待时间
-	DefaultMaxWaitDuration = time.Second * 5
+	DefaultMaxWaitDuration = time.Second * 10
 )
 
 // Output 通用输出接口
@@ -33,6 +33,14 @@ func NewOutput(cfg *config.OutputConfig) (Output, error) {
 		return output, err
 	}
 
+	if !reflect.ValueOf(cfg.Typesense).IsZero() {
+		// 2. 创建输入实例
+		output := &TypesenseOutput{}
+
+		err := output.NewOutput(cfg)
+
+		return output, err
+	}
 	if !reflect.ValueOf(cfg.MeiliSearch).IsZero() {
 		// 2. 创建输入实例
 		output := &MeiliSearchOutput{}

@@ -5,17 +5,16 @@ import (
 	"strings"
 
 	"github.com/go-lazyer/nsync/config"
-	"github.com/go-lazyer/nsync/input"
 )
 
 type Tables struct {
 	tables map[string]config.Table // key: input schema.table, value: output schema.table
 }
 
-func NewTables(conf *config.Config) (*Tables, error) {
+func NewTables(fliter *config.Filter) (*Tables, error) {
 	tables := make(map[string]config.Table, 0)
 
-	for _, table := range conf.Filter.Tables {
+	for _, table := range fliter.Tables {
 		if !strings.Contains(table.Input, ".") {
 			return nil, fmt.Errorf("table input %s is not valid, it should be in the format of schema.table", table.Input)
 		}
@@ -25,22 +24,18 @@ func NewTables(conf *config.Config) (*Tables, error) {
 		tables[table.Input] = table
 	}
 
-
-	
 	return &Tables{tables}, nil
 }
 
-func (f *Tables) Apply(event *input.Event) bool {
+func (f *Tables) Apply(database, table string) (string, string, bool) {
 	if len(f.tables) == 0 {
-		return true
+		return database, table, false
 	}
-	key := event.SourceSchema + "." + event.SourceTable
-	table, ok := f.tables[key]
+	key := database + "." + table
+	outputTable, ok := f.tables[key]
 	if !ok {
-		return false
+		return database, table, false
 	}
-	value := strings.Split(table.Output, ".")
-	event.Schema = value[0]
-	event.Table = value[1]
-	return true
+	value := strings.Split(outputTable.Output, ".")
+	return value[0], value[1], true
 }

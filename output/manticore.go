@@ -2,12 +2,18 @@ package output
 
 import (
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-lazyer/north/nslice"
 	"github.com/go-lazyer/north/nsql"
 	"github.com/go-lazyer/north/ntime"
 	"github.com/go-lazyer/north/ntype"
@@ -19,11 +25,13 @@ import (
 
 type ManticoreOutput struct {
 	db              *sql.DB
+	origin          string
 	buffers         []*input.Event //mysql
 	bufferTime      time.Time      // 每个表的批次时间
 	conf            *config.OutputConfig
 	tableColumnType map[string]map[string]string
 	mu              sync.Mutex //互斥锁
+	batchSize       int        //互斥锁
 }
 
 func (output *ManticoreOutput) NewOutput(cfg *config.OutputConfig) error {
@@ -43,10 +51,13 @@ func (output *ManticoreOutput) NewOutput(cfg *config.OutputConfig) error {
 	db.SetMaxIdleConns(2)
 	output.db = db
 
+	output.origin = fmt.Sprintf("http://%s:%v", cfg.Manticore.Host, cfg.Manticore.HttpPort)
+
 	// 初始化缓冲区
 	output.buffers = make([]*input.Event, 0)
 	// 初始化缓冲区时间
 	output.bufferTime = time.Now()
+	output.batchSize = cfg.Manticore.BatchSize
 
 	columnTypes, err := initTableColumnType(db)
 	if err != nil {
@@ -89,11 +100,29 @@ func (output *ManticoreOutput) Buffer(event *input.Event) (position string, err 
 	output.mu.Lock()
 	defer output.mu.Unlock()
 
+	// //非主键更新
+	// if event.Columns[event.ColumnPkeys[0]] != "id" {
+	// 	err = output.Flush()
+	// 	if err != nil {
+	// 		return "", err
+	// 	}
+	// 	err = output.FlushBySql(event)
+	// 	if err != nil {
+	// 		return "", err
+	// 	}
+	// 	return event.Position, nil
+	// }
+
 	output.buffers = append(output.buffers, event)
+
+	batchSize := DefaultMaxBatchSize
+	if output.batchSize > 0 {
+		batchSize = output.batchSize
+	}
 
 	// 触发批量条件
 	// 先检查数量触发
-	if len(output.buffers) >= DefaultMaxBatchSize {
+	if len(output.buffers) >= batchSize {
 		err = output.Flush()
 		if err == nil {
 			return event.Position, nil
@@ -109,61 +138,73 @@ func (output *ManticoreOutput) Buffer(event *input.Event) (position string, err 
 	return "", err
 }
 
-func (output *ManticoreOutput) Flush() error {
+func (output *ManticoreOutput) FlushBySql(event *input.Event) error {
 
-	if len(output.buffers) == 0 {
-		return nil
-	}
 	tx, err := output.db.Begin()
 	if err != nil {
 		return err
 	}
 	// UPDATE 更新全文字段或列存属性的内容请使用 REPLACE。
 	// UPDATE 主键，需要拆分为delete加insert
-	for _, event := range output.buffers {
-		removeUnknownColumn(event, output)
-		setDefault(event)
-		resetAction(event, output)
-		switch event.Action {
-		case "update": // 不能更新全文字段或列存属性
-			if err := output.upsertEvent(tx, event); err != nil {
-				tx.Rollback()
-				return err
-			}
-		case "replace": // 不能更新全文字段或列存属性，先查询旧的
-			if err := output.replaceEvent(tx, event); err != nil {
-				tx.Rollback()
-				return err
-			}
-		case "repkey": // 修改主键，先replace新的，然后删除旧的
-			if err := output.replaceEvent(tx, event); err != nil {
-				tx.Rollback()
-				return err
-			}
-			if err := output.deleteEvent(tx, event); err != nil {
-				tx.Rollback()
-				return err
-			}
-		case "insert":
-			if err := output.insertEvent(tx, event); err != nil {
-				tx.Rollback()
-				return err
-			}
-		case "delete":
-			if err := output.deleteEvent(tx, event); err != nil {
-				tx.Rollback()
-				return err
-			}
+	// removeUnknownColumn(event, output)
+	// setDefault(event)
+	// resetAction(event, output)
+	switch event.Action {
+	case "update": // 不能更新全文字段或列存属性
+		if err := output.upsertEvent(tx, event); err != nil {
+			tx.Rollback()
+			return err
 		}
-
+	case "replace": // 不能更新全文字段或列存属性，先查询旧的
+		if err := output.replaceEvent(tx, event); err != nil {
+			tx.Rollback()
+			return err
+		}
+	case "insert":
+		if err := output.insertEvent(tx, event); err != nil {
+			tx.Rollback()
+			return err
+		}
+	case "delete":
+		if err := output.deleteEvent(tx, event); err != nil {
+			tx.Rollback()
+			return err
+		}
 	}
+
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	return nil
+}
+func (output *ManticoreOutput) Flush() error {
+
+	if len(output.buffers) == 0 {
+		return nil
+	}
+	//update 会导致二级索引失效，需要转换为replace
+	// idmap := make(map[any]struct{})
+	for i := 0; i < len(output.buffers); i++ {
+		// removeUnknownColumn(output.buffers[i], output)
+		//清空没有变化的字段，ID除外
+		// removeNoChange(output.buffers[i])
+
+		// setDefault(output.buffers[i])
+		// resetAction(output.buffers[i], output)
+		//打印table，action。betterevent afterevent
+		// log.Printf("flush table:%v;action:%v;\n", output.buffers[i].SourceTable, output.buffers[i].Action)
+		// idmap[output.buffers[i].AfterRow[output.buffers[i].ColumnPkeys[0]]] = struct{}{}
+	}
+
+	err := output.bulk(output.buffers)
+	if err != nil {
+		return err
+	}
+
 	// 清空缓冲
 	output.buffers = output.buffers[:0]
 	// Reset batch time
-	output.bufferTime = time.Time{}
+	output.bufferTime = time.Now()
 	return nil
 }
 
@@ -206,7 +247,18 @@ func (output *ManticoreOutput) upsertEvent(tx *sql.Tx, event *input.Event) error
 		}
 
 	}
-	query := fmt.Sprintf("update %s set %s  where %v=%v", event.Table, strings.Join(sets, ","), event.Columns[event.ColumnPkeys[0]], event.AfterRow[event.ColumnPkeys[0]])
+	var where string
+	if constant.IsStringType(event.ColumnTypes[event.ColumnPkeys[0]]) {
+		where = fmt.Sprintf("%s='%v'", event.Columns[event.ColumnPkeys[0]], event.AfterRow[event.ColumnPkeys[0]])
+	} else {
+		where = fmt.Sprintf("%s=%v", event.Columns[event.ColumnPkeys[0]], event.AfterRow[event.ColumnPkeys[0]])
+	}
+	table := event.Table
+	if event.Database != "" {
+		table = event.Database + ":" + event.Table
+	}
+
+	query := fmt.Sprintf("update %s set %s  where %s", table, strings.Join(sets, ","), where)
 
 	_, err := tx.Exec(query)
 	if err != nil {
@@ -220,7 +272,9 @@ func (output *ManticoreOutput) selectEvent(tx *sql.Tx, event *input.Event) (map[
 	}
 	query := fmt.Sprintf("select * from %s where id = %v", event.Table, event.AfterRow[event.ColumnPkeys[0]])
 	rows, err := tx.Query(query)
-
+	if err != nil {
+		return nil, nil, err
+	}
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, nil, err
@@ -318,6 +372,160 @@ func (output *ManticoreOutput) deleteEvent(tx *sql.Tx, event *input.Event) error
 	_, err := tx.Exec(query)
 	return err
 }
+func (output *ManticoreOutput) bulk(events []*input.Event) error {
+	if events == nil {
+		return nil
+	}
+	ndjson := make([]string, 0)
+	for _, event := range events {
+		switch event.Action {
+		case "update":
+			afterMap := event.ToAfterMap()
+			id := afterMap["id"]
+			delete(afterMap, "id")
+			for key := range afterMap {
+				if output.tableColumnType[event.Table][key] == "text" {
+					delete(afterMap, key)
+				}
+			}
+			dataMap := map[string]any{
+				"id":    id,
+				"table": event.Table,
+				"doc":   afterMap,
+			}
+			if event.Database != "" {
+				dataMap["cluster"] = event.Database
+			}
+			d, _ := json.Marshal(map[string]any{event.Action: dataMap})
+			ndjson = append(ndjson, string(d))
+		case "replace":
+			afterMap := event.ToAfterMap()
+			id := afterMap["id"]
+			delete(afterMap, "id")
+
+			dataMap := map[string]any{
+				"id":    id,
+				"table": event.Table,
+				"doc":   afterMap,
+			}
+			if event.Database != "" {
+				dataMap["cluster"] = event.Database
+			}
+			d, _ := json.Marshal(map[string]any{event.Action: dataMap})
+			ndjson = append(ndjson, string(d))
+		case "insert":
+			afterMap := event.ToAfterMap()
+			id := afterMap["id"]
+			delete(afterMap, "id")
+			dataMap := map[string]any{
+				"id":    id,
+				"table": event.Table,
+				"doc":   afterMap,
+			}
+			if event.Database != "" {
+				dataMap["cluster"] = event.Database
+			}
+			d, _ := json.Marshal(map[string]any{event.Action: dataMap})
+
+			ndjson = append(ndjson, string(d))
+		case "delete": //{ "delete" : { "table" : "test", "id" : 1 } }
+			beforeMap := event.ToBeforeMap()
+			dataMap := map[string]any{
+				"id":    beforeMap["id"],
+				"table": event.Table,
+			}
+			if event.Database != "" {
+				dataMap["cluster"] = event.Database
+			}
+			d, _ := json.Marshal(map[string]any{event.Action: dataMap})
+			ndjson = append(ndjson, string(d))
+		}
+
+	}
+
+	client := &http.Client{}
+	req, err := http.NewRequest("POST", output.origin+"/bulk", strings.NewReader(strings.Join(ndjson, "\n")))
+	if err != nil {
+		return err
+	}
+	req.Header.Add("Content-Type", "application/x-ndjson")
+
+	response, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("client.Do error %v", err)
+	}
+	if response != nil {
+		defer response.Body.Close()
+	}
+	res, err := io.ReadAll(response.Body)
+	if err != nil {
+		return fmt.Errorf("io.ReadAll error %v", err)
+	}
+
+	resMap := make(map[string]any)
+	err = json.Unmarshal(res, &resMap)
+	if err != nil {
+		return fmt.Errorf("json.Unmarshal error %v", err)
+	}
+	// log.Printf("manticore bulk size: %v\n", len(ndjson))
+	errs := resMap["errors"]
+	if errs.(bool) {
+		line := ntype.ToInt(resMap["current_line"])
+		return fmt.Errorf("bulk request=%v\n; response error %v", ndjson[line-1], string(res))
+	}
+	return nil
+}
+func (output *ManticoreOutput) searchById(beferId any, table string) (map[string]any, error) {
+	client := &http.Client{}
+	body := fmt.Sprintf(`{"table":"%v","query": {"equals": {"id": %v}}}`, table, beferId)
+
+	req, err := http.NewRequest("POST", output.origin+"/search", strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Content-Type", "application/x-ndjson")
+
+	response, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if response != nil {
+		defer response.Body.Close()
+	}
+	res, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// total := jsoniter.Get(res, "hits", "total").ToInt()
+	// if total == 0 {
+	// 	return nil, nil
+	// }
+
+	// m := make(map[string]any, 0)
+	// jsoniter.Get(res, "hits", "hits", 0, "_source").ToVal(&m)
+
+	resMap := make(map[string]any)
+	err = json.Unmarshal(res, &resMap)
+	if err != nil {
+		return nil, fmt.Errorf("json.Unmarshal error %v", err)
+	}
+
+	errs := resMap["error"]
+	if errs != nil {
+		return nil, errors.New(string(res))
+	}
+	hits := resMap["hits"].(map[string]any)
+	total := int(hits["total"].(float64))
+	if total == 0 {
+		return nil, nil
+	}
+	hitsArray := hits["hits"].([]any)
+	firstHit := hitsArray[0].(map[string]any)
+	m := firstHit["_source"].(map[string]any)
+	return m, nil
+}
+
 func setDefault(event *input.Event) {
 	for i := 0; i < len(event.AfterRow); i++ {
 		if constant.IsDateType(event.ColumnTypes[i]) {
@@ -325,16 +533,30 @@ func setDefault(event *input.Event) {
 			if valus == nil {
 				valus = "1970-01-01T00:00:00"
 			}
-			event.AfterRow[i] = ntime.Parse(ntype.ToString(valus)).Unix()
+			t := ntime.Parse(ntype.ToString(valus))
+			if t.IsZero() {
+				event.AfterRow[i] = 0
+			} else {
+				event.AfterRow[i] = t.Unix()
+			}
 		} else if constant.IsStringType(event.ColumnTypes[i]) {
-			valus := event.AfterRow[i]
-			if valus == nil {
+			valus := ""
+			if event.AfterRow[i] == nil {
 				valus = ""
 			}
 			if ntype.IsSlice(valus) {
-				valus = string(event.AfterRow[i].([]uint8))
+				valus = string(event.AfterRow[i].([]byte))
+			} else {
+				valus = ntype.ToString(event.AfterRow[i])
 			}
-			event.AfterRow[i] = CleanSpecialChars(valus)
+
+			if json.Valid([]byte(valus)) {
+				event.AfterRow[i] = valus
+			} else {
+				event.AfterRow[i] = CleanSpecialChars(valus)
+			}
+		} else if constant.IsMultiType(event.ColumnTypes[i]) {
+			// event.AfterRow[i] = fmt.Sprintf("(%v)", event.AfterRow[i])
 		} else {
 			if event.AfterRow[i] == nil {
 				event.AfterRow[i] = 0
@@ -347,16 +569,30 @@ func setDefault(event *input.Event) {
 			if valus == nil {
 				valus = "1970-01-01T00:00:00"
 			}
-			event.BeforeRow[i] = ntime.Parse(ntype.ToString(valus)).Unix()
+			t := ntime.Parse(ntype.ToString(valus))
+			if t.IsZero() {
+				event.BeforeRow[i] = 0
+			} else {
+				event.BeforeRow[i] = t.Unix()
+			}
 		} else if constant.IsStringType(event.ColumnTypes[i]) {
-			valus := event.BeforeRow[i]
-			if valus == nil {
+			valus := ""
+			if event.BeforeRow[i] == nil {
 				valus = ""
 			}
 			if ntype.IsSlice(valus) {
-				valus = string(event.BeforeRow[i].([]uint8))
+				valus = string(event.BeforeRow[i].([]byte))
+			} else {
+				valus = ntype.ToString(event.BeforeRow[i])
 			}
-			event.BeforeRow[i] = CleanSpecialChars(valus)
+
+			if json.Valid([]byte(valus)) {
+				event.BeforeRow[i] = valus
+			} else {
+				event.BeforeRow[i] = CleanSpecialChars(valus)
+			}
+		} else if constant.IsMultiType(event.ColumnTypes[i]) {
+			// event.BeforeRow[i] = fmt.Sprintf("(%v)", event.BeforeRow[i])
 		} else {
 			if event.BeforeRow[i] == nil {
 				event.BeforeRow[i] = 0
@@ -365,21 +601,25 @@ func setDefault(event *input.Event) {
 	}
 }
 
-// 如果修改了主键，action设置为repkey
-// 如果修改了索引字段，action设置为replace
 func resetAction(event *input.Event, output *ManticoreOutput) {
 	if event.Action != "update" {
 		return
 	}
+	// if event.Action == "update" {
+	// 	event.Action = "replace"
+	// 	return
+	// }
 	// 如果修改了主键，action设置为repkey
-	if event.AfterRow[event.ColumnPkeys[0]] != event.BeforeRow[event.ColumnPkeys[0]] {
-		event.Action = "repkey"
+	if event.BeforeRow[event.ColumnPkeys[0]] != event.AfterRow[event.ColumnPkeys[0]] {
+		event.Action = "replace"
 		return
 	}
+
 	columnType := output.tableColumnType[event.Table]
 	if columnType == nil {
 		return
 	}
+	// 如果修改了索引字段，action设置为replace
 	columnKey := event.GetKeysByColumns()
 	for k, v := range columnType {
 		if v != "text" {
@@ -394,23 +634,58 @@ func resetAction(event *input.Event, output *ManticoreOutput) {
 
 // 移除未知字段
 func removeUnknownColumn(event *input.Event, output *ManticoreOutput) {
-	if event.Action != "update" {
+	unknownColumns := make([]int, 0)
+
+	for n, column := range event.Columns {
+		if _, ok := output.tableColumnType[event.Table][column]; !ok {
+			unknownColumns = append(unknownColumns, n)
+		}
+	}
+	event.Columns = nslice.Removes(event.Columns, unknownColumns)
+	event.ColumnTypes = nslice.Removes(event.ColumnTypes, unknownColumns)
+
+	if len(event.BeforeRow) > 0 {
+		event.BeforeRow = nslice.Removes(event.BeforeRow, unknownColumns)
+	}
+	if len(event.AfterRow) > 0 {
+		event.AfterRow = nslice.Removes(event.AfterRow, unknownColumns)
+	}
+}
+
+// removeNoChange removes unchanged columns from the event, except the primary key (ID).
+func removeNoChange(event *input.Event) {
+	if event.Action != "update" || len(event.BeforeRow) != len(event.AfterRow) {
 		return
 	}
 
-	columns := event.Columns
+	// Build a set of primary key column indices for O(1) lookup
+	pkeySet := make(map[int]struct{})
+	for _, idx := range event.ColumnPkeys {
+		pkeySet[idx] = struct{}{}
+	}
 
-	for n, column := range columns {
-		if _, ok := output.tableColumnType[event.Table][column]; ok {
+	var unchangedColumns []int
+
+	for i := 0; i < len(event.BeforeRow); i++ {
+		// Skip primary key columns
+		if _, isPKey := pkeySet[i]; isPKey {
 			continue
 		}
-		event.Columns = append(columns[:n], columns[n+1:]...)
-		event.ColumnTypes = append(event.ColumnTypes[:n], event.ColumnTypes[n+1:]...)
-		if len(event.BeforeRow) > 0 {
-			event.BeforeRow = append(event.BeforeRow[:n], event.BeforeRow[n+1:]...)
-		}
-		if len(event.AfterRow) > 0 {
-			event.AfterRow = append(event.AfterRow[:n], event.AfterRow[n+1:]...)
+
+		before := event.BeforeRow[i]
+		after := event.AfterRow[i]
+
+		// Use DeepEqual to safely compare slices, strings, ints, etc.
+		if reflect.DeepEqual(before, after) {
+			unchangedColumns = append(unchangedColumns, i)
 		}
 	}
+
+	// Remove unchanged columns from all slices
+	event.Columns = nslice.Removes(event.Columns, unchangedColumns)
+	event.ColumnTypes = nslice.Removes(event.ColumnTypes, unchangedColumns)
+	event.BeforeRow = nslice.Removes(event.BeforeRow, unchangedColumns)
+	event.AfterRow = nslice.Removes(event.AfterRow, unchangedColumns)
+	keyMaps := event.GetKeysByColumns()
+	event.ColumnPkeys = []int{keyMaps["id"]}
 }
