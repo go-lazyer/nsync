@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-lazyer/north/nhttp"
 	"github.com/go-lazyer/north/nslice"
 	"github.com/go-lazyer/north/nsql"
 	"github.com/go-lazyer/north/ntime"
@@ -58,7 +59,9 @@ func (output *ManticoreOutput) NewOutput(cfg *config.OutputConfig) error {
 	// 初始化缓冲区时间
 	output.bufferTime = time.Now()
 	output.batchSize = cfg.Manticore.BatchSize
-
+	if output.batchSize <= 0 {
+		output.batchSize = DefaultMaxBatchSize
+	}
 	columnTypes, err := initTableColumnType(db)
 	if err != nil {
 		return err
@@ -95,49 +98,68 @@ func initTableColumnType(db *sql.DB) (map[string]map[string]string, error) {
 	return columnTypes, nil
 }
 
-// 只有保存成功才返回position，
+// CountBufferEvent returns the number of events currently in the output buffer.
+func (output *ManticoreOutput) CountBufferEvent() int {
+	return len(output.buffers)
+}
+
+// 把事件添加到缓冲区，并根据批量条件触发 Flush
 func (output *ManticoreOutput) Buffer(event *input.Event) (position string, err error) {
+	output.buffers = append(output.buffers, event)
+	return output.Flush(false)
+}
+func (output *ManticoreOutput) Flush(force bool) (string, error) {
 	output.mu.Lock()
 	defer output.mu.Unlock()
 
-	// //非主键更新
-	// if event.Columns[event.ColumnPkeys[0]] != "id" {
-	// 	err = output.Flush()
-	// 	if err != nil {
-	// 		return "", err
-	// 	}
-	// 	err = output.FlushBySql(event)
-	// 	if err != nil {
-	// 		return "", err
-	// 	}
-	// 	return event.Position, nil
-	// }
-
-	output.buffers = append(output.buffers, event)
-
-	batchSize := DefaultMaxBatchSize
-	if output.batchSize > 0 {
-		batchSize = output.batchSize
+	if len(output.buffers) == 0 {
+		return "", nil
 	}
 
 	// 触发批量条件
 	// 先检查数量触发
-	if len(output.buffers) >= batchSize {
-		err = output.Flush()
-		if err == nil {
-			return event.Position, nil
-		}
+	if !force && len(output.buffers) < output.batchSize {
+		return "", nil
 	}
 	// 时间触发
-	if time.Since(output.bufferTime) >= DefaultMaxWaitDuration {
-		err = output.Flush()
-		if err == nil {
-			return event.Position, nil
-		}
+	if !force && time.Since(output.bufferTime) < DefaultMaxWaitDuration {
+		return "", nil
 	}
-	return "", err
+
+	// position 为最后一个事件的 position
+	position := output.buffers[len(output.buffers)-1].Position
+	err := output.bulk(output.buffers)
+	if err != nil {
+		return "", err
+	}
+
+	// 清空缓冲
+	output.buffers = output.buffers[:0]
+	// Reset batch time
+	output.bufferTime = time.Now()
+	return position, nil
 }
 
+func (output *ManticoreOutput) FlushAll() (string, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+
+	if len(output.buffers) == 0 {
+		return "", nil
+	}
+	// position 为最后一个事件的 position
+	position := output.buffers[len(output.buffers)-1].Position
+	err := output.bulk(output.buffers)
+	if err != nil {
+		return "", err
+	}
+
+	// 清空缓冲
+	output.buffers = output.buffers[:0]
+	// Reset batch time
+	output.bufferTime = time.Now()
+	return position, nil
+}
 func (output *ManticoreOutput) FlushBySql(event *input.Event) error {
 
 	tx, err := output.db.Begin()
@@ -177,48 +199,6 @@ func (output *ManticoreOutput) FlushBySql(event *input.Event) error {
 	}
 	return nil
 }
-func (output *ManticoreOutput) Flush() error {
-
-	if len(output.buffers) == 0 {
-		return nil
-	}
-	//update 会导致二级索引失效，需要转换为replace
-	// idmap := make(map[any]struct{})
-	for i := 0; i < len(output.buffers); i++ {
-		// removeUnknownColumn(output.buffers[i], output)
-		//清空没有变化的字段，ID除外
-		// removeNoChange(output.buffers[i])
-
-		// setDefault(output.buffers[i])
-		// resetAction(output.buffers[i], output)
-		//打印table，action。betterevent afterevent
-		// log.Printf("flush table:%v;action:%v;\n", output.buffers[i].SourceTable, output.buffers[i].Action)
-		// idmap[output.buffers[i].AfterRow[output.buffers[i].ColumnPkeys[0]]] = struct{}{}
-	}
-
-	err := output.bulk(output.buffers)
-	if err != nil {
-		return err
-	}
-
-	// 清空缓冲
-	output.buffers = output.buffers[:0]
-	// Reset batch time
-	output.bufferTime = time.Now()
-	return nil
-}
-
-// func (mysql *ManticoreOutput) FlushAll() error {
-// 	mysql.mu.Lock()
-// 	defer mysql.mu.Unlock()
-
-// 	for table := range mysql.buffer {
-// 		if err := mysql.Flush(); err != nil {
-// 			return err
-// 		}
-// 	}
-// 	return nil
-// }
 
 func (output *ManticoreOutput) Close() error {
 	return output.db.Close()
@@ -443,27 +423,13 @@ func (output *ManticoreOutput) bulk(events []*input.Event) error {
 
 	}
 
-	client := &http.Client{}
-	req, err := http.NewRequest("POST", output.origin+"/bulk", strings.NewReader(strings.Join(ndjson, "\n")))
+	resp, err := nhttp.NewRequest().PostNdjson(output.origin+"/bulk", strings.Join(ndjson, "\n"))
 	if err != nil {
-		return err
-	}
-	req.Header.Add("Content-Type", "application/x-ndjson")
-
-	response, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("client.Do error %v", err)
-	}
-	if response != nil {
-		defer response.Body.Close()
-	}
-	res, err := io.ReadAll(response.Body)
-	if err != nil {
-		return fmt.Errorf("io.ReadAll error %v", err)
+		return fmt.Errorf("PostNdjson error %v", err)
 	}
 
 	resMap := make(map[string]any)
-	err = json.Unmarshal(res, &resMap)
+	err = json.Unmarshal([]byte(resp.Body), &resMap)
 	if err != nil {
 		return fmt.Errorf("json.Unmarshal error %v", err)
 	}
@@ -471,13 +437,19 @@ func (output *ManticoreOutput) bulk(events []*input.Event) error {
 	errs := resMap["errors"]
 	if errs.(bool) {
 		line := ntype.ToInt(resMap["current_line"])
-		return fmt.Errorf("bulk request=%v\n; response error %v", ndjson[line-1], string(res))
+		return fmt.Errorf("bulk request=%v\n; response error %v", ndjson[line-1], string(resp.Body))
 	}
 	return nil
 }
-func (output *ManticoreOutput) searchById(beferId any, table string) (map[string]any, error) {
+
+// queryByIds 查询多个 id 并返回以 id 字符串为键的文档映射
+func (output *ManticoreOutput) queryByIds(beferIds []any, table string) (map[string]map[string]any, error) {
+	if len(beferIds) == 0 {
+		return nil, nil
+	}
+
 	client := &http.Client{}
-	body := fmt.Sprintf(`{"table":"%v","query": {"equals": {"id": %v}}}`, table, beferId)
+	body := fmt.Sprintf(`{"table":"%v","query": {"in": {"id": [%s]}}}`, table, ntype.JoinAny(beferIds, ","))
 
 	req, err := http.NewRequest("POST", output.origin+"/search", strings.NewReader(body))
 	if err != nil {
@@ -497,14 +469,6 @@ func (output *ManticoreOutput) searchById(beferId any, table string) (map[string
 		return nil, err
 	}
 
-	// total := jsoniter.Get(res, "hits", "total").ToInt()
-	// if total == 0 {
-	// 	return nil, nil
-	// }
-
-	// m := make(map[string]any, 0)
-	// jsoniter.Get(res, "hits", "hits", 0, "_source").ToVal(&m)
-
 	resMap := make(map[string]any)
 	err = json.Unmarshal(res, &resMap)
 	if err != nil {
@@ -515,15 +479,47 @@ func (output *ManticoreOutput) searchById(beferId any, table string) (map[string
 	if errs != nil {
 		return nil, errors.New(string(res))
 	}
-	hits := resMap["hits"].(map[string]any)
-	total := int(hits["total"].(float64))
-	if total == 0 {
+	hitsAny, ok := resMap["hits"]
+	if !ok || hitsAny == nil {
+		return nil, nil
+	}
+	hits := hitsAny.(map[string]any)
+	totalFloat, ok := hits["total"].(float64)
+	if !ok || int(totalFloat) == 0 {
 		return nil, nil
 	}
 	hitsArray := hits["hits"].([]any)
-	firstHit := hitsArray[0].(map[string]any)
-	m := firstHit["_source"].(map[string]any)
-	return m, nil
+
+	result := make(map[string]map[string]any, len(hitsArray))
+	for _, h := range hitsArray {
+		hit, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		src, ok := hit["_source"].(map[string]any)
+		if !ok {
+			src = map[string]any{}
+		}
+
+		// 返回数据里 _source 可能没有 id，兼容 dwid 和顶层 _id。
+		idVal, exists := src["id"]
+		if !exists || idVal == nil {
+			if dwid, hasDWID := src["dwid"]; hasDWID && dwid != nil {
+				idVal = dwid
+			} else if hid, hasHitID := hit["_id"]; hasHitID && hid != nil {
+				idVal = hid
+			}
+		}
+		if idVal == nil {
+			continue
+		}
+
+		idKey := fmt.Sprintf("%v", idVal)
+		src["id"] = idVal
+		result[idKey] = src
+	}
+	return result, nil
 }
 
 func setDefault(event *input.Event) {
@@ -641,14 +637,14 @@ func removeUnknownColumn(event *input.Event, output *ManticoreOutput) {
 			unknownColumns = append(unknownColumns, n)
 		}
 	}
-	event.Columns = nslice.Removes(event.Columns, unknownColumns)
-	event.ColumnTypes = nslice.Removes(event.ColumnTypes, unknownColumns)
+	event.Columns = nslice.Remove(event.Columns, unknownColumns...)
+	event.ColumnTypes = nslice.Remove(event.ColumnTypes, unknownColumns...)
 
 	if len(event.BeforeRow) > 0 {
-		event.BeforeRow = nslice.Removes(event.BeforeRow, unknownColumns)
+		event.BeforeRow = nslice.Remove(event.BeforeRow, unknownColumns...)
 	}
 	if len(event.AfterRow) > 0 {
-		event.AfterRow = nslice.Removes(event.AfterRow, unknownColumns)
+		event.AfterRow = nslice.Remove(event.AfterRow, unknownColumns...)
 	}
 }
 
@@ -682,10 +678,10 @@ func removeNoChange(event *input.Event) {
 	}
 
 	// Remove unchanged columns from all slices
-	event.Columns = nslice.Removes(event.Columns, unchangedColumns)
-	event.ColumnTypes = nslice.Removes(event.ColumnTypes, unchangedColumns)
-	event.BeforeRow = nslice.Removes(event.BeforeRow, unchangedColumns)
-	event.AfterRow = nslice.Removes(event.AfterRow, unchangedColumns)
+	event.Columns = nslice.Remove(event.Columns, unchangedColumns...)
+	event.ColumnTypes = nslice.Remove(event.ColumnTypes, unchangedColumns...)
+	event.BeforeRow = nslice.Remove(event.BeforeRow, unchangedColumns...)
+	event.AfterRow = nslice.Remove(event.AfterRow, unchangedColumns...)
 	keyMaps := event.GetKeysByColumns()
 	event.ColumnPkeys = []int{keyMaps["id"]}
 }

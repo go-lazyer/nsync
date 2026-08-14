@@ -46,11 +46,12 @@ type OutputTypesense struct {
 }
 
 type OutputStarrocks struct {
-	Host     string `toml:"host"`
-	Port     int    `toml:"port"`
-	Username string `toml:"username"`
-	Password string `toml:"password"`
-	Database string `toml:"database"`
+	Host      string `toml:"host"`
+	Port      int    `toml:"port"`
+	Username  string `toml:"username"`
+	Password  string `toml:"password"`
+	Database  string `toml:"database"`
+	BatchSize int    `toml:"batch_size"`
 }
 type OutputMeiliSearch struct {
 	Origin      string `toml:"origin"`

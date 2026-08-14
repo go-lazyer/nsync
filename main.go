@@ -55,9 +55,6 @@ func main() {
 		cleaning,
 		output,
 	)
-	// 创建上下文用于优雅关机
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// 启动处理器
 	go func() {
@@ -67,7 +64,7 @@ func main() {
 				return
 			}
 		}()
-		if err := processor.Run(ctx); err != nil {
+		if err := processor.Run(); err != nil {
 			log.Fatalf("Processor failed: %v", err)
 		}
 	}()
@@ -78,9 +75,6 @@ func main() {
 	<-sigChan
 
 	log.Println("Shutting down...")
-
-	// 启动优雅关机
-	cancel()
 
 	// 等待资源清理
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)

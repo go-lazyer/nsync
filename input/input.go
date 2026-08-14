@@ -47,8 +47,11 @@ func (e *Event) ToAfterMap() map[string]any {
 
 type Input interface {
 	GetEvent() <-chan *Event
+	CountEvent() int
 	CloseEvent()
 	SavePosition(position string) error // 保存当前处理位置
+	SubmitEvent(event *Event)           // 外部注入事件到管道
+	TotalEvent() (int64, int64)
 }
 
 func NewInput(cfg *config.InputConfig, filter *filter.Chain) (Input, error) {

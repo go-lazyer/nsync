@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"log"
@@ -24,10 +25,12 @@ const POSITION_FILE_NAME = "_mysql_binlog_gtid_position.info"
 var POSITION_GTID string = ""
 
 type MysqlInput struct {
-	canal  *canal.Canal
-	event  chan *Event
-	once   sync.Once
-	filter *filter.Chain
+	canal            *canal.Canal
+	event            chan *Event // binlog 事件 + 外部注入事件（统一通道）
+	once             sync.Once
+	filter           *filter.Chain
+	syncEventTotal   atomic.Int64 // 统计通过同步接口添加的事件数量
+	manualEventTotal atomic.Int64 // 统计通过人工接口添加的事件数量
 }
 
 func NewMysqlInput(cfg *config.InputConfig, filter *filter.Chain) (*MysqlInput, error) {
@@ -54,7 +57,7 @@ func NewMysqlInput(cfg *config.InputConfig, filter *filter.Chain) (*MysqlInput, 
 	}
 	mysqlInput := &MysqlInput{
 		canal:  c,
-		event:  make(chan *Event, 2048),
+		event:  make(chan *Event, 1000),
 		filter: filter,
 	}
 	handler := &EventHandler{
@@ -102,6 +105,19 @@ func NewMysqlInput(cfg *config.InputConfig, filter *filter.Chain) (*MysqlInput, 
 func (m *MysqlInput) GetEvent() <-chan *Event {
 	return m.event
 }
+func (m *MysqlInput) CountEvent() int {
+	return len(m.event)
+}
+func (m *MysqlInput) TotalEvent() (int64, int64) {
+	return m.syncEventTotal.Load(), m.manualEventTotal.Load()
+}
+
+// SubmitEvent 外部注入事件到管道，与 binlog 事件共用同一通道
+func (m *MysqlInput) SubmitEvent(event *Event) {
+	m.event <- event
+	m.manualEventTotal.Add(1)
+}
+
 func (i *MysqlInput) CloseEvent() {
 	i.once.Do(func() {
 		close(i.event)
@@ -220,15 +236,17 @@ func (h *EventHandler) OnRow(e *canal.RowsEvent) error {
 		if len(afterRows) > i {
 			event.AfterRow = afterRows[i]
 		}
-
+		h.input.syncEventTotal.Add(1)
 		// 发送到通道（带上下文超时控制）
+		// 这里设置一个合理的超时时间，防止在消费者处理慢时导致生产者阻塞过久
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		select {
 		case h.input.event <- event:
 		case <-ctx.Done():
-			log.Printf("Event send timeout, action: %s, table: %s, schema: %s, channel length: %d, channel capacity: %d",
-				event.Action, event.Table, event.Database, len(h.input.event), cap(h.input.event))
+			log.Printf("Event send timeout,  %s: %s,action: %s, channel length: %d, capacity: %d", event.Database, event.Table, event.Action, len(h.input.event), cap(h.input.event))
+			//打印完整的事件信息，帮助排查问题
+			log.Printf("Event details: %+v", event)
 			return ctx.Err()
 		}
 	}
