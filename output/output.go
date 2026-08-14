@@ -18,12 +18,20 @@ const (
 // Output 通用输出接口
 type Output interface {
 	NewOutput(cfg *config.OutputConfig) error
-	Buffer(event *input.Event) (string, error)
+	Buffer(event *input.Event) (map[string]string, error)
 	CountBufferEvent() int
-	Flush(force bool) (string, error)
+	Flush(force bool) (map[string]string, error)
 }
 
 func NewOutput(cfg *config.OutputConfig) (Output, error) {
+	if !reflect.ValueOf(cfg.Postgres).IsZero() {
+		output := &PostgresOutput{}
+
+		err := output.NewOutput(cfg)
+
+		return output, err
+	}
+
 	if !reflect.ValueOf(cfg.Manticore).IsZero() {
 		// 2. 创建输入实例
 		output := &ManticoreOutput{}
@@ -49,14 +57,14 @@ func NewOutput(cfg *config.OutputConfig) (Output, error) {
 
 	// 	return output, err
 	// }
-	// if !reflect.ValueOf(cfg.Starrocks).IsZero() {
-	// 	// 2. 创建输入实例
-	// 	output := &StarrocksOutput{}
+	if !reflect.ValueOf(cfg.Starrocks).IsZero() {
+		// 2. 创建输入实例
+		output := &StarrocksOutput{}
 
-	// 	err := output.NewOutput(cfg)
+		err := output.NewOutput(cfg)
 
-	// 	return output, err
-	// }
+		return output, err
+	}
 	// if !reflect.ValueOf(cfg.Mysql).IsZero() {
 	// 	// 2. 创建输入实例
 	// 	output := &MysqlOutput{}
@@ -66,4 +74,14 @@ func NewOutput(cfg *config.OutputConfig) (Output, error) {
 	// 	return output, err
 	// }
 	return nil, nil
+}
+func GetPosition(events []*input.Event) map[string]string {
+	result := make(map[string]string)
+	for _, event := range events {
+		if event.InputName == "" || event.Position == "" {
+			continue
+		}
+		result[event.InputName] = event.Position
+	}
+	return result
 }

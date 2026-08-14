@@ -104,62 +104,37 @@ func (output *ManticoreOutput) CountBufferEvent() int {
 }
 
 // 把事件添加到缓冲区，并根据批量条件触发 Flush
-func (output *ManticoreOutput) Buffer(event *input.Event) (position string, err error) {
+func (output *ManticoreOutput) Buffer(event *input.Event) (map[string]string, error) {
 	output.buffers = append(output.buffers, event)
 	return output.Flush(false)
 }
-func (output *ManticoreOutput) Flush(force bool) (string, error) {
+func (output *ManticoreOutput) Flush(force bool) (map[string]string, error) {
 	output.mu.Lock()
 	defer output.mu.Unlock()
 
 	if len(output.buffers) == 0 {
-		return "", nil
+		return nil, nil
 	}
 
-	// 触发批量条件
-	// 先检查数量触发
-	if !force && len(output.buffers) < output.batchSize {
-		return "", nil
-	}
-	// 时间触发
-	if !force && time.Since(output.bufferTime) < DefaultMaxWaitDuration {
-		return "", nil
+	// 触发批量条件：数量达标 或 时间超时，任一满足即 flush
+	if !force && len(output.buffers) < output.batchSize && time.Since(output.bufferTime) < DefaultMaxWaitDuration {
+		return nil, nil
 	}
 
-	// position 为最后一个事件的 position
-	position := output.buffers[len(output.buffers)-1].Position
+	positionMap := GetPosition(output.buffers)
+
 	err := output.bulk(output.buffers)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	// 清空缓冲
 	output.buffers = output.buffers[:0]
 	// Reset batch time
 	output.bufferTime = time.Now()
-	return position, nil
+	return positionMap, nil
 }
 
-func (output *ManticoreOutput) FlushAll() (string, error) {
-	output.mu.Lock()
-	defer output.mu.Unlock()
-
-	if len(output.buffers) == 0 {
-		return "", nil
-	}
-	// position 为最后一个事件的 position
-	position := output.buffers[len(output.buffers)-1].Position
-	err := output.bulk(output.buffers)
-	if err != nil {
-		return "", err
-	}
-
-	// 清空缓冲
-	output.buffers = output.buffers[:0]
-	// Reset batch time
-	output.bufferTime = time.Now()
-	return position, nil
-}
 func (output *ManticoreOutput) FlushBySql(event *input.Event) error {
 
 	tx, err := output.db.Begin()

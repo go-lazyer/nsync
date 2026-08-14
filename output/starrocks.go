@@ -4,6 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +50,7 @@ func (output *StarrocksOutput) transactionHeaders(label string) map[string]strin
 		"label":            label,
 		"db":               output.conf.Starrocks.Database,
 		"transaction_type": "multi",
+		"load_timeout":     "60", //测试使用 3600 秒，生产环境可调整或改为配置项
 	}
 
 	return headers
@@ -80,7 +84,7 @@ func (output *StarrocksOutput) beginTransaction(label string, table string) erro
 	host := output.conf.Starrocks.Host
 	port := output.conf.Starrocks.Port
 	loadURL := fmt.Sprintf("http://%s:%d/api/transaction/begin", host, port)
-	response, err := nhttp.NewRequest().Header(headers).Timeout(30).Do("POST", loadURL, nil)
+	response, err := nhttp.NewRequest().Header(headers).Timeout(60).Do("POST", loadURL, nil)
 	if err != nil {
 		return err
 	}
@@ -108,6 +112,7 @@ func (output *StarrocksOutput) loadTransaction(label string, event *input.Event)
 	headers["strip_outer_array"] = "true"
 
 	switch event.Action {
+
 	case "insert":
 		if len(event.AfterRow) == 0 {
 			return nil
@@ -120,11 +125,13 @@ func (output *StarrocksOutput) loadTransaction(label string, event *input.Event)
 		row = event.ToAfterMap()
 		// update 语义按 partial update 发送。
 		headers["partial_update"] = "true"
-	case "delete":
-		if len(event.BeforeRow) == 0 {
+		headers["columns"] = strings.Join(event.Columns, ",")
+
+	case "replace":
+		if len(event.AfterRow) == 0 {
 			return nil
 		}
-		row = event.ToBeforeMap()
+		row = event.ToAfterMap()
 	default:
 		return nil
 	}
@@ -137,7 +144,28 @@ func (output *StarrocksOutput) loadTransaction(label string, event *input.Event)
 	host := output.conf.Starrocks.Host
 	port := output.conf.Starrocks.Port
 	loadURL := fmt.Sprintf("http://%s:%d/api/transaction/load", host, port)
-	response, err := nhttp.NewRequest().Header(headers).Timeout(30).Do("PUT", loadURL, strings.NewReader(string(body)))
+
+	req := nhttp.NewRequest()
+
+	req.CheckRedirect(func(req *http.Request, via []*http.Request) error {
+
+		if "http://39.102.122.234:8030/api/transaction/load" != req.Referer() {
+			return nil
+		}
+		println("重定向URL:", req.URL.String())
+		u := req.URL.String()
+		u = strings.ReplaceAll(u, "172.17.171.99", "39.102.122.234")
+		u = strings.ReplaceAll(u, "172.17.205.146", "39.102.125.217")
+
+		newUrl, _ := url.Parse(u)
+		req.URL = newUrl
+		// Go 重定向到不同 host 时会自动剥离 Authorization，
+		// 但 CheckRedirect 在剥离之后、发送之前执行，手动补回即可
+		req.Header.Set("Authorization", headers["Authorization"])
+		req.Header.Set("Expect", "100-continue")
+		return nil
+	})
+	response, err := req.Header(headers).Timeout(60).Do("PUT", loadURL, strings.NewReader(string(body)))
 	if err != nil {
 		return err
 	}
@@ -148,12 +176,13 @@ func (output *StarrocksOutput) loadTransaction(label string, event *input.Event)
 	return output.parseTransactionResult("load", result)
 }
 
-// prepareTransaction 将事务从 PREPARE 推进到 PREPARED。
+// 预提交事务，相当于暂存，集群奔溃后可以恢复（对于事物不是必须的的）
 func (output *StarrocksOutput) prepareTransaction(label string) error {
 	headers := output.transactionHeaders(label)
 	host := output.conf.Starrocks.Host
 	port := output.conf.Starrocks.Port
 	loadURL := fmt.Sprintf("http://%s:%d/api/transaction/prepare", host, port)
+
 	response, err := nhttp.NewRequest().Header(headers).Timeout(30).Do("POST", loadURL, nil)
 	if err != nil {
 		return err
@@ -211,67 +240,87 @@ func parseResponse(response nhttp.Response) (map[string]interface{}, error) {
 	return result, err
 }
 
-func (output *StarrocksOutput) Buffer(event *input.Event) (position string, err error) {
+func (output *StarrocksOutput) Buffer(event *input.Event) (map[string]string, error) {
 	output.buffers = append(output.buffers, event)
 	return output.Flush(false)
 }
 
 // Flush 按条件触发写入：数量达标或时间超时任一满足即刷。
-func (output *StarrocksOutput) Flush(force bool) (string, error) {
+// force 强制提交，不考虑批量条件，常用于定时器触发或程序退出前的最终提交。
+func (output *StarrocksOutput) Flush(force bool) (map[string]string, error) {
 	output.mu.Lock()
 	defer output.mu.Unlock()
 	if len(output.buffers) == 0 {
-		return "", nil
+		return nil, nil
 	}
 
-	// 触发批量条件
-	// 先检查数量触发
-	if !force && len(output.buffers) < output.batchSize {
-		return "", nil
-	}
-	// 时间触发
-	if !force && time.Since(output.bufferTime) < DefaultMaxWaitDuration {
-		return "", nil
+	// 触发批量条件：数量达标 或 时间超时，任一满足即 flush
+	if !force && len(output.buffers) < output.batchSize && time.Since(output.bufferTime) < DefaultMaxWaitDuration {
+		return nil, nil
 	}
 
-	// 生成全局唯一的事务标签，便于日志追踪和排障。
-	label := "nsync_" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	positionMap := GetPosition(output.buffers)
 
-	if err := output.beginTransaction(label, output.buffers[0].Table); err != nil {
-		return "", err
-	}
-	position := output.buffers[len(output.buffers)-1].Position
+	groupEvents := make(map[string][]*input.Event) // 按 sourceTable 分组事件
 	for _, event := range output.buffers {
-		if err := output.loadTransaction(label, event); err != nil {
+		if event.SourceTable == event.Table {
+			groupEvents["main"] = append(groupEvents["main"], event)
+		} else {
+			key := strings.Join(event.Columns, ",")
+			groupEvents[key] = append(groupEvents[key], event)
+		}
+	}
+
+	for _, events := range groupEvents {
+		// 生成全局唯一的事务标签，便于日志追踪和排障。
+		label := "nsync_" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		count := len(events)
+
+		if err := output.beginTransaction(label, events[0].Table); err != nil {
+			log.Printf("[txn] label=%s count=%d status=FAIL step=begin reason=%v", label, count, err)
+			return nil, err
+		}
+
+		for _, event := range events {
+			// e, _ := json.Marshal(event)
+			// log.Printf("[txn] label=%s count=%d; event=%s;", label, count, string(e))
+			// log.Printf("[txn] label=%s count=%d; event=%s;", label, count, event.SourceTable)
+			if err := output.loadTransaction(label, event); err != nil {
+				e, _ := json.Marshal(event)
+				log.Printf("[txn] label=%s count=%d; event=%s; status=FAIL step=load reason=%v", label, count, string(e), err)
+				rollbackErr := output.rollbackTransaction(label)
+				if rollbackErr != nil {
+					return nil, fmt.Errorf("%w; rollback error: %v", err, rollbackErr)
+				}
+				return nil, err
+			}
+		}
+
+		// if err := output.prepareTransaction(label); err != nil {
+		// 	rollbackErr := output.rollbackTransaction(label)
+		// 	if rollbackErr != nil {
+		// 		return "", fmt.Errorf("%w; rollback error: %v", err, rollbackErr)
+		// 	}
+		// 	return "", err
+		// }
+
+		if err := output.commitTransaction(label); err != nil {
+			log.Printf("[txn] label=%s count=%d status=FAIL step=commit reason=%v", label, count, err)
 			rollbackErr := output.rollbackTransaction(label)
 			if rollbackErr != nil {
-				return "", fmt.Errorf("%w; rollback error: %v", err, rollbackErr)
+				return nil, fmt.Errorf("%w; rollback error: %v", err, rollbackErr)
 			}
-			return "", err
+			return nil, err
 		}
-	}
 
-	if err := output.prepareTransaction(label); err != nil {
-		rollbackErr := output.rollbackTransaction(label)
-		if rollbackErr != nil {
-			return "", fmt.Errorf("%w; rollback error: %v", err, rollbackErr)
-		}
-		return "", err
-	}
-
-	if err := output.commitTransaction(label); err != nil {
-		rollbackErr := output.rollbackTransaction(label)
-		if rollbackErr != nil {
-			return "", fmt.Errorf("%w; rollback error: %v", err, rollbackErr)
-		}
-		return "", err
+		log.Printf("[txn] label=%s event=%s count=%d status=SUCCESS", label, events[0].SourceTable, count)
 	}
 
 	// 清空缓冲
 	output.buffers = output.buffers[:0]
 	// Reset batch time
 	output.bufferTime = time.Now()
-	return position, nil
+	return positionMap, nil
 }
 
 func (output *StarrocksOutput) CountBufferEvent() int {

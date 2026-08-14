@@ -1,6 +1,6 @@
 module github.com/go-lazyer/nsync
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/go-lazyer/north v0.1.3
@@ -13,6 +13,13 @@ require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
+	github.com/jackc/pgio v1.0.0 // indirect
+	github.com/jackc/pglogrepl v0.0.0-20260401131349-e37c41485510 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/pgx/v5 v5.10.0 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 )
 
 require (
@@ -28,7 +35,7 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/text v0.24.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
 

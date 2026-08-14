@@ -21,6 +21,9 @@ func NewCleaning() *Cleaning {
 }
 
 func (p *Cleaning) AddCleaner(cleaner Cleaner) {
+	if cleaner == nil {
+		return
+	}
 	if p.cleaners == nil {
 		p.cleaners = make(map[string]Cleaner)
 	}

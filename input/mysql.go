@@ -1,14 +1,12 @@
 package input
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"log"
 
@@ -20,35 +18,40 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 )
 
-const POSITION_FILE_NAME = "_mysql_binlog_gtid_position.info"
-
-var POSITION_GTID string = ""
-
 type MysqlInput struct {
-	canal            *canal.Canal
-	event            chan *Event // binlog 事件 + 外部注入事件（统一通道）
-	once             sync.Once
-	filter           *filter.Chain
-	syncEventTotal   atomic.Int64 // 统计通过同步接口添加的事件数量
-	manualEventTotal atomic.Int64 // 统计通过人工接口添加的事件数量
+	name         string
+	positionFile string
+	positionGTID string
+	canal        *canal.Canal
+	event        chan *Event
+	once         sync.Once
+	filter       *filter.Chain
+	eventTotal   atomic.Int64 // 统计通过同步接口添加的事件数量
 }
 
-func NewMysqlInput(cfg *config.InputConfig, filter *filter.Chain) (*MysqlInput, error) {
-	// 1. 初始化 Canal 配置
-	// &canal.Config{
-	// 	ServerID:        uint32(rand.New(rand.NewSource(time.Now().Unix())).Intn(1000)) + 1001, // 必须设置有效 ServerID
-	// 	Addr:            cfg.Mysql.Host + ":" + strconv.Itoa(cfg.Mysql.Port),
-	// 	User:            cfg.Mysql.Username,
-	// 	Password:        cfg.Mysql.Password,
-	// 	Flavor:          "mysql", // 明确指定数据库类型
-	// 	HeartbeatPeriod: 200 * time.Millisecond,
-	// 	ReadTimeout:     300 * time.Millisecond,
-	// }
+func (i *MysqlInput) Close() {
+	if i == nil {
+		return
+	}
+	i.once.Do(func() {
+		if i.canal != nil {
+			i.canal.Close()
+		}
+	})
+}
 
+func (i *MysqlInput) TotalEvent() int64 {
+	if i == nil {
+		return 0
+	}
+	return i.eventTotal.Load()
+}
+
+func NewMysqlInput(cfg *config.InputMysql, filter *filter.Chain, event chan *Event) (*MysqlInput, error) {
 	cf := canal.NewDefaultConfig()
-	cf.Addr = cfg.Mysql.Host + ":" + strconv.Itoa(cfg.Mysql.Port)
-	cf.User = cfg.Mysql.Username
-	cf.Password = cfg.Mysql.Password
+	cf.Addr = cfg.Host + ":" + strconv.Itoa(cfg.Port)
+	cf.User = cfg.Username
+	cf.Password = cfg.Password
 	cf.Dump.ExecutionPath = "" // ignore mysqldump, use binlog only
 
 	c, err := canal.NewCanal(cf)
@@ -56,15 +59,17 @@ func NewMysqlInput(cfg *config.InputConfig, filter *filter.Chain) (*MysqlInput, 
 		return nil, err
 	}
 	mysqlInput := &MysqlInput{
-		canal:  c,
-		event:  make(chan *Event, 1000),
-		filter: filter,
+		canal:        c,
+		event:        event,
+		filter:       filter,
+		name:         cfg.Name,
+		positionFile: fmt.Sprintf("_%s%s", cfg.Name, POSITION_FILE_NAME),
 	}
 	handler := &EventHandler{
 		input: mysqlInput,
 	}
 	c.SetEventHandler(handler)
-	gtid, err := os.ReadFile(POSITION_FILE_NAME)
+	gtid, err := os.ReadFile(mysqlInput.positionFile)
 	if err != nil {
 		log.Printf("Failed to read GTID file: %v", err)
 	}
@@ -102,39 +107,17 @@ func NewMysqlInput(cfg *config.InputConfig, filter *filter.Chain) (*MysqlInput, 
 	return mysqlInput, nil
 }
 
-func (m *MysqlInput) GetEvent() <-chan *Event {
-	return m.event
-}
-func (m *MysqlInput) CountEvent() int {
-	return len(m.event)
-}
-func (m *MysqlInput) TotalEvent() (int64, int64) {
-	return m.syncEventTotal.Load(), m.manualEventTotal.Load()
-}
-
-// SubmitEvent 外部注入事件到管道，与 binlog 事件共用同一通道
-func (m *MysqlInput) SubmitEvent(event *Event) {
-	m.event <- event
-	m.manualEventTotal.Add(1)
-}
-
-func (i *MysqlInput) CloseEvent() {
-	i.once.Do(func() {
-		close(i.event)
-	})
-}
-
 func (i *MysqlInput) SavePosition(position string) error {
-	if POSITION_GTID == "" { //表示系统刚启动
-		POSITION_GTID = position
+	if i.positionGTID == "" { //表示系统刚启动,所以第一次不回保存位置
+		i.positionGTID = position
 		return nil
 	}
-	if POSITION_GTID == position { //事务未完成 内多条语句，位置未变更，
+	if i.positionGTID == position { //事务未完成 内多条语句，位置未变更，
 		return nil
 	}
-	// p := strings.ReplaceAll(POSITION_GTID, ":", ":1-")
-	POSITION_GTID = position
-	return os.WriteFile(POSITION_FILE_NAME, []byte(position), 0644)
+	// p := strings.ReplaceAll(i.positionGTID, ":", ":1-")
+	i.positionGTID = position
+	return os.WriteFile(i.positionFile, []byte(position), 0644)
 }
 
 // *OnRow(e RowsEvent)
@@ -219,6 +202,7 @@ func (h *EventHandler) OnRow(e *canal.RowsEvent) error {
 	}
 	for i := 0; i < count; i++ {
 		event := &Event{
+			InputName:      h.input.name,
 			SourceDatabase: e.Table.Schema,
 			SourceTable:    e.Table.Name,
 			Database:       schema,
@@ -236,18 +220,10 @@ func (h *EventHandler) OnRow(e *canal.RowsEvent) error {
 		if len(afterRows) > i {
 			event.AfterRow = afterRows[i]
 		}
-		h.input.syncEventTotal.Add(1)
-		// 发送到通道（带上下文超时控制）
-		// 这里设置一个合理的超时时间，防止在消费者处理慢时导致生产者阻塞过久
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		select {
-		case h.input.event <- event:
-		case <-ctx.Done():
-			log.Printf("Event send timeout,  %s: %s,action: %s, channel length: %d, capacity: %d", event.Database, event.Table, event.Action, len(h.input.event), cap(h.input.event))
-			//打印完整的事件信息，帮助排查问题
-			log.Printf("Event details: %+v", event)
-			return ctx.Err()
+		// channel 满时阻塞等待消费者，形成背压，避免丢事件
+		if h.input.event != nil {
+			h.input.event <- event
+			h.input.eventTotal.Add(1)
 		}
 	}
 

@@ -11,9 +11,6 @@ import (
 
 	"github.com/go-lazyer/nsync/cleaning"
 	"github.com/go-lazyer/nsync/config"
-	"github.com/go-lazyer/nsync/filter"
-	"github.com/go-lazyer/nsync/input"
-	"github.com/go-lazyer/nsync/output"
 	"github.com/go-lazyer/nsync/processor"
 	"github.com/pingcap/errors"
 )
@@ -29,32 +26,15 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// 初始化过滤器链
-	filterChain, err := filter.NewChain(&cfg.Filter)
-	if err != nil {
-		log.Fatalf("Failed to init filter: %v", err)
-	}
-
-	// 初始化输入源
-	input, err := input.NewInput(&cfg.Input, filterChain)
-	if err != nil {
-		log.Fatalf("Failed to init input: %v", err)
-	}
-
-	// 初始化清洗器
+	// 清洗器在 main 中初始化，按业务拆分保留在调用层
 	cleaning := cleaning.NewCleaning()
+	cleaning.AddCleaner(nil)
 
-	output, err := output.NewOutput(&cfg.Output)
+	// 创建处理器，内部统一初始化 input / output / filter
+	proc, err := processor.NewProcessor(cfg, cleaning)
 	if err != nil {
-		log.Fatalf("Failed to init  output: %v", err)
+		log.Fatalf("Failed to init processor: %v", err)
 	}
-
-	// 创建处理器,真实处理数据的
-	processor := processor.NewProcessor(
-		input,
-		cleaning,
-		output,
-	)
 
 	// 启动处理器
 	go func() {
@@ -64,7 +44,7 @@ func main() {
 				return
 			}
 		}()
-		if err := processor.Run(); err != nil {
+		if err := proc.Run(); err != nil {
 			log.Fatalf("Processor failed: %v", err)
 		}
 	}()
@@ -81,7 +61,7 @@ func main() {
 	defer shutdownCancel()
 
 	// 确保所有数据刷新并保存位置
-	processor.Shutdown(shutdownCtx)
+	proc.Shutdown(shutdownCtx)
 
 	log.Println("Shutdown completed")
 }

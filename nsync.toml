@@ -1,9 +1,27 @@
-[input.mysql]
+[[input.mysql]]
+name = "mysql_local"
 host = "localhost"
 port = 3306
 username = "root"
 password = "******"
 
+[[input.mysql]]
+name = "mysql_source"
+host = "localhost"
+port = 3306
+username = "root"
+password = "******"
+
+[[input.postgres]]
+name = "pg_source"
+host = "localhost"
+port = 5432
+username = "postgres"
+password = "******"
+database = "appdb"
+slot = "nsync_slot"
+publication = "nsync_pub"
+status_interval_sec = 10
 
 [output.mysql]
 host = "localhost"
@@ -11,7 +29,6 @@ port = 3306
 username = "root"
 password = "******"
 database = "daowei"
-
 
 [output.manticore]
 host = "localhost"
@@ -39,13 +56,11 @@ database = "daowei"
 origin = "http://localhost:7700"
 admin_api_key = "******"
 
-
-
 [[filter.databases]]
-input= "test"
-output= "test"
+input = "test"
+output = "test"
 
 [[filter.tables]]
-input= "test.user"
+input = "test.user"
 output = "test.user"
 

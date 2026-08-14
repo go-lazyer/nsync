@@ -2,53 +2,89 @@ package processor
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/go-lazyer/nsync/cleaning"
+	"github.com/go-lazyer/nsync/config"
+	"github.com/go-lazyer/nsync/filter"
 	"github.com/go-lazyer/nsync/input"
 	"github.com/go-lazyer/nsync/output"
 )
 
 type Processor struct {
-	input    input.Input
+	input    *input.InputManager
 	output   output.Output
 	cleaning *cleaning.Cleaning
 	doneChan chan struct{}
 }
 
-func NewProcessor(input input.Input, cleaning *cleaning.Cleaning, output output.Output) *Processor {
-	return &Processor{
-		input:    input,
-		cleaning: cleaning,
-		output:   output,
-		doneChan: make(chan struct{}), // 初始化通道
+func NewProcessor(cfg *config.Config, c *cleaning.Cleaning) (*Processor, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is empty")
 	}
+
+	filterChain, err := filter.NewChain(&cfg.Filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init filter: %w", err)
+	}
+	inputManager, err := input.NewInput(&cfg.Input, filterChain)
+	if err != nil {
+		return nil, err
+	}
+	proc := &Processor{
+		input:    inputManager,
+		doneChan: make(chan struct{}),
+		cleaning: c,
+	}
+
+	out, err := output.NewOutput(&cfg.Output)
+	if err != nil {
+		return nil, err
+	}
+	proc.output = out
+
+	return proc, nil
+}
+
+func (p *Processor) GetEvent() <-chan *input.Event {
+	if p == nil {
+		return nil
+	}
+	return p.input.GetEvent()
 }
 
 func (p *Processor) Run() error {
-	defer close(p.doneChan) // 确保结束时关闭通道
-	eventChan := p.input.GetEvent()
+	defer close(p.doneChan)
 
+	eventChan := p.GetEvent()
+	if eventChan == nil {
+		return nil
+	}
 	for event := range eventChan {
+		if p.cleaning == nil {
+			continue
+		}
+		if event.InputName == "test_mysql_daowei" {
+			fmt.Print("rwer")
+		}
 		// 这个应该注意 Cleaning 扩展出来的多个events 只有最后一个事件才会保存位置，前面生成的事件都不保存位置，因为他们都是基于同一个输入事件生成的
 		events, err := p.cleaning.Cleaning(event)
 		if err != nil {
 			log.Printf("err:%v;event:%v\n", err, event)
-			continue
+			return err
 		}
 		if len(events) == 0 {
 			continue
 		}
 
 		for _, e := range events {
-			e.Database = "" // 清空数据库字段，避免输出到 manticore 时被当做集群名称
-			savePosition, err := p.output.Buffer(&e)
+			positionMap, err := p.output.Buffer(&e)
 			if err != nil {
-				log.Printf("Failed to buffer event: %v", err)
 				return err
 			}
-			if savePosition != "" {
-				p.input.SavePosition(savePosition)
+			if len(positionMap) > 0 {
+				p.input.SavePosition(positionMap)
 			}
 		}
 	}
@@ -56,54 +92,45 @@ func (p *Processor) Run() error {
 }
 
 func (p *Processor) SubmitEvent(event *input.Event) {
-	// 停止接收新事件
+	if event == nil {
+		return
+	}
 	p.input.SubmitEvent(event)
 }
 func (p *Processor) CountInputEventQueue() int {
-	// 获取当前事件通道中的事件数量
 	return p.input.CountEvent()
 }
 func (p *Processor) CountOutputEventBuffer() int {
-	// 获取当前输出缓冲中的事件数量
+	if p.output == nil {
+		return 0
+	}
 	return p.output.CountBufferEvent()
 }
-func (p *Processor) TotalEvent() (int64, int64) {
+func (p *Processor) TotalEvent() int64 {
 	return p.input.TotalEvent()
-}
-func (p *Processor) FlushAll() error {
-	// 获取当前输出缓冲中的事件数量
-	// 刷新所有输出缓冲
-	savePosition, err := p.output.FlushAll()
-	if err != nil {
-		log.Printf("Failed to FlushAll output buffer: %v", err)
-		return err
-	}
-	if savePosition != "" {
-		p.input.SavePosition(savePosition)
-	}
-	return nil
 }
 
 // processor.go
 func (p *Processor) Shutdown(ctx context.Context) error {
-	// 停止接收新事件
-	p.input.CloseEvent()
+	p.input.Close()
 
-	// 等待处理中的事件完成
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-p.doneChan: // 添加doneChan来通知处理完成
+	case <-p.doneChan:
 	}
 
-	// 刷新所有输出缓冲
-	savePosition, err := p.output.FlushAll()
+	if p.output == nil {
+		return nil
+	}
+
+	positionMap, err := p.output.Flush(true)
 	if err != nil {
 		log.Printf("Failed to Shutdown output buffer: %v", err)
 		return err
 	}
-	if savePosition != "" {
-		p.input.SavePosition(savePosition)
+	if len(positionMap) > 0 {
+		p.input.SavePosition(positionMap)
 	}
 	return nil
 }
