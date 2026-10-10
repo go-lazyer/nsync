@@ -65,9 +65,6 @@ func (p *Processor) Run() error {
 		if p.cleaning == nil {
 			continue
 		}
-		if event.InputName == "test_mysql_daowei" {
-			fmt.Print("rwer")
-		}
 		// 这个应该注意 Cleaning 扩展出来的多个events 只有最后一个事件才会保存位置，前面生成的事件都不保存位置，因为他们都是基于同一个输入事件生成的
 		events, err := p.cleaning.Cleaning(event)
 		if err != nil {

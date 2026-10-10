@@ -50,7 +50,7 @@ func (output *StarrocksOutput) transactionHeaders(label string) map[string]strin
 		"label":            label,
 		"db":               output.conf.Starrocks.Database,
 		"transaction_type": "multi",
-		"load_timeout":     "60", //测试使用 3600 秒，生产环境可调整或改为配置项
+		"load_timeout":     "300", //测试使用 3600 秒，生产环境可调整或改为配置项
 	}
 
 	return headers
@@ -80,11 +80,32 @@ func (output *StarrocksOutput) parseTransactionResult(op string, result map[stri
 // beginTransaction 开启一个事务，始终按 multi 事务模式请求。
 func (output *StarrocksOutput) beginTransaction(label string, table string) error {
 	headers := output.transactionHeaders(label)
-	headers["table"] = table
-	host := output.conf.Starrocks.Host
-	port := output.conf.Starrocks.Port
+	// headers["table"] = table
+	host := output.conf.Starrocks.FeHost
+	port := output.conf.Starrocks.FeHttpPort
 	loadURL := fmt.Sprintf("http://%s:%d/api/transaction/begin", host, port)
-	response, err := nhttp.NewRequest().Header(headers).Timeout(60).Do("POST", loadURL, nil)
+
+	req := nhttp.NewRequest()
+
+	req.CheckRedirect(func(req *http.Request, via []*http.Request) error {
+
+		if "http://182.92.121.152:8030/api/transaction/begin" != req.Referer() {
+			return nil
+		}
+		println("重定向URL:", req.URL.String())
+		u := req.URL.String()
+		u = strings.ReplaceAll(u, "172.17.205.153", "182.92.121.152")
+
+		newUrl, _ := url.Parse(u)
+		req.URL = newUrl
+		// Go 重定向到不同 host 时会自动剥离 Authorization，
+		// 但 CheckRedirect 在剥离之后、发送之前执行，手动补回即可
+		req.Header.Set("Authorization", headers["Authorization"])
+		req.Header.Set("Expect", "100-continue")
+		return nil
+	})
+
+	response, err := req.Header(headers).Timeout(60).Do("POST", loadURL, nil)
 	if err != nil {
 		return err
 	}
@@ -98,7 +119,7 @@ func (output *StarrocksOutput) beginTransaction(label string, table string) erro
 // loadTransaction 向事务中写入单行 JSON 数据，并区分 upsert / delete / partial update。
 func (output *StarrocksOutput) loadTransaction(label string, event *input.Event) error {
 	if event == nil {
-		return nil
+		return fmt.Errorf("event cannot be null")
 	}
 
 	if event.Table == "" {
@@ -110,52 +131,59 @@ func (output *StarrocksOutput) loadTransaction(label string, event *input.Event)
 	headers["table"] = event.Table
 	headers["format"] = "json"
 	headers["strip_outer_array"] = "true"
-
+	// headers["columns"] = "__op"
 	switch event.Action {
 
 	case "insert":
 		if len(event.AfterRow) == 0 {
-			return nil
+			return fmt.Errorf("starrocks load failed: action is insert event cannot be empty")
 		}
 		row = event.ToAfterMap()
+		// return nil
 	case "update":
 		if len(event.AfterRow) == 0 {
-			return nil
+			return fmt.Errorf("starrocks load failed: action is update event cannot be empty")
 		}
 		row = event.ToAfterMap()
-		// update 语义按 partial update 发送。
-		headers["partial_update"] = "true"
-		headers["columns"] = strings.Join(event.Columns, ",")
-
+		// // update 语义按 partial update 发送。
+		// headers["partial_update"] = "true"
+		// headers["columns"] = strings.Join(event.Columns, ",")
+		// return nil
 	case "replace":
 		if len(event.AfterRow) == 0 {
-			return nil
+			return fmt.Errorf("starrocks load failed: action is replace event cannot be empty")
 		}
 		row = event.ToAfterMap()
+	case "delete": // delete 和 insert，update 在同一事务中，会报错load request not equal last，所以建议单独事务处理
+		if len(event.BeforeRow) == 0 {
+			return fmt.Errorf("starrocks load failed: action is delete event cannot be empty")
+		}
+		row = event.ToBeforeMap()
+		headers["columns"] = "__op='delete'"
 	default:
+		e, _ := json.Marshal(event)
+		log.Printf("unknown action: %s, event: %s", event.Action, string(e))
 		return nil
 	}
-
 	body, err := json.Marshal([]map[string]interface{}{row})
 	if err != nil {
 		return err
 	}
 
-	host := output.conf.Starrocks.Host
-	port := output.conf.Starrocks.Port
+	host := output.conf.Starrocks.FeHost
+	port := output.conf.Starrocks.FeHttpPort
 	loadURL := fmt.Sprintf("http://%s:%d/api/transaction/load", host, port)
 
 	req := nhttp.NewRequest()
 
 	req.CheckRedirect(func(req *http.Request, via []*http.Request) error {
 
-		if "http://39.102.122.234:8030/api/transaction/load" != req.Referer() {
+		if "http://182.92.121.152:8030/api/transaction/load" != req.Referer() {
 			return nil
 		}
 		println("重定向URL:", req.URL.String())
 		u := req.URL.String()
-		u = strings.ReplaceAll(u, "172.17.171.99", "39.102.122.234")
-		u = strings.ReplaceAll(u, "172.17.205.146", "39.102.125.217")
+		u = strings.ReplaceAll(u, "172.17.205.153", "182.92.121.152")
 
 		newUrl, _ := url.Parse(u)
 		req.URL = newUrl
@@ -169,6 +197,7 @@ func (output *StarrocksOutput) loadTransaction(label string, event *input.Event)
 	if err != nil {
 		return err
 	}
+	// log.Printf("[load] label=%s body=%s; response=%s;", label, string(body), string(response.Body))
 	result, err := parseResponse(response)
 	if err != nil {
 		return err
@@ -179,11 +208,31 @@ func (output *StarrocksOutput) loadTransaction(label string, event *input.Event)
 // 预提交事务，相当于暂存，集群奔溃后可以恢复（对于事物不是必须的的）
 func (output *StarrocksOutput) prepareTransaction(label string) error {
 	headers := output.transactionHeaders(label)
-	host := output.conf.Starrocks.Host
-	port := output.conf.Starrocks.Port
+	host := output.conf.Starrocks.FeHost
+	port := output.conf.Starrocks.FeHttpPort
 	loadURL := fmt.Sprintf("http://%s:%d/api/transaction/prepare", host, port)
 
-	response, err := nhttp.NewRequest().Header(headers).Timeout(30).Do("POST", loadURL, nil)
+	req := nhttp.NewRequest()
+
+	req.CheckRedirect(func(req *http.Request, via []*http.Request) error {
+
+		if "http://182.92.121.152:8030/api/transaction/prepare" != req.Referer() {
+			return nil
+		}
+		println("重定向URL:", req.URL.String())
+		u := req.URL.String()
+		u = strings.ReplaceAll(u, "172.17.205.153", "182.92.121.152")
+
+		newUrl, _ := url.Parse(u)
+		req.URL = newUrl
+		// Go 重定向到不同 host 时会自动剥离 Authorization，
+		// 但 CheckRedirect 在剥离之后、发送之前执行，手动补回即可
+		req.Header.Set("Authorization", headers["Authorization"])
+		req.Header.Set("Expect", "100-continue")
+		return nil
+	})
+
+	response, err := req.Header(headers).Timeout(30).Do("POST", loadURL, nil)
 	if err != nil {
 		return err
 	}
@@ -197,13 +246,35 @@ func (output *StarrocksOutput) prepareTransaction(label string) error {
 // commitTransaction 提交事务并持久化已写入数据。
 func (output *StarrocksOutput) commitTransaction(label string) error {
 	headers := output.transactionHeaders(label)
-	host := output.conf.Starrocks.Host
-	port := output.conf.Starrocks.Port
+	host := output.conf.Starrocks.FeHost
+	port := output.conf.Starrocks.FeHttpPort
 	loadURL := fmt.Sprintf("http://%s:%d/api/transaction/commit", host, port)
-	response, err := nhttp.NewRequest().Header(headers).Timeout(30).Do("POST", loadURL, nil)
+
+	req := nhttp.NewRequest()
+
+	req.CheckRedirect(func(req *http.Request, via []*http.Request) error {
+
+		if "http://182.92.121.152:8030/api/transaction/commit" != req.Referer() {
+			return nil
+		}
+		println("重定向URL:", req.URL.String())
+		u := req.URL.String()
+		u = strings.ReplaceAll(u, "172.17.205.153", "182.92.121.152")
+
+		newUrl, _ := url.Parse(u)
+		req.URL = newUrl
+		// Go 重定向到不同 host 时会自动剥离 Authorization，
+		// 但 CheckRedirect 在剥离之后、发送之前执行，手动补回即可
+		req.Header.Set("Authorization", headers["Authorization"])
+		req.Header.Set("Expect", "100-continue")
+		return nil
+	})
+
+	response, err := req.Header(headers).Timeout(30).Do("POST", loadURL, nil)
 	if err != nil {
 		return err
 	}
+	// log.Printf("[commit] label=%s response=%s;", label, string(response.Body))
 	result, err := parseResponse(response)
 	if err != nil {
 		return err
@@ -214,8 +285,8 @@ func (output *StarrocksOutput) commitTransaction(label string) error {
 // rollbackTransaction 回滚事务，用于任一步骤失败后的补偿。
 func (output *StarrocksOutput) rollbackTransaction(label string) error {
 	headers := output.transactionHeaders(label)
-	host := output.conf.Starrocks.Host
-	port := output.conf.Starrocks.Port
+	host := output.conf.Starrocks.FeHost
+	port := output.conf.Starrocks.FeHttpPort
 	loadURL := fmt.Sprintf("http://%s:%d/api/transaction/rollback", host, port)
 	response, err := nhttp.NewRequest().Header(headers).Timeout(30).Do("POST", loadURL, nil)
 	if err != nil {
@@ -263,30 +334,34 @@ func (output *StarrocksOutput) Flush(force bool) (map[string]string, error) {
 
 	groupEvents := make(map[string][]*input.Event) // 按 sourceTable 分组事件
 	for _, event := range output.buffers {
-		if event.SourceTable == event.Table {
-			groupEvents["main"] = append(groupEvents["main"], event)
-		} else {
-			key := strings.Join(event.Columns, ",")
-			groupEvents[key] = append(groupEvents[key], event)
+		// if event.SourceTable == event.Table {
+		// 	groupEvents["main"] = append(groupEvents["main"], event)
+		// } else { //适用于表A修改了，要修改表B的情况
+		// 	key := strings.Join(event.Columns, ",")
+		// 	groupEvents[key] = append(groupEvents[key], event)
+		// }
+
+		switch event.Action {
+		case "delete":
+			groupEvents["delete"] = append(groupEvents["delete"], event)
+		case "insert", "update":
+			groupEvents["upsert"] = append(groupEvents["upsert"], event)
 		}
 	}
 
-	for _, events := range groupEvents {
+	for action, events := range groupEvents {
 		// 生成全局唯一的事务标签，便于日志追踪和排障。
 		label := "nsync_" + strconv.FormatInt(time.Now().UnixNano(), 10)
 		count := len(events)
-
+		log.Printf("[txn] label=%s count=%d ;action=%s status=begin", label, count, action)
 		if err := output.beginTransaction(label, events[0].Table); err != nil {
 			log.Printf("[txn] label=%s count=%d status=FAIL step=begin reason=%v", label, count, err)
 			return nil, err
 		}
 
 		for _, event := range events {
-			// e, _ := json.Marshal(event)
-			// log.Printf("[txn] label=%s count=%d; event=%s;", label, count, string(e))
-			// log.Printf("[txn] label=%s count=%d; event=%s;", label, count, event.SourceTable)
+			e, _ := json.Marshal(event)
 			if err := output.loadTransaction(label, event); err != nil {
-				e, _ := json.Marshal(event)
 				log.Printf("[txn] label=%s count=%d; event=%s; status=FAIL step=load reason=%v", label, count, string(e), err)
 				rollbackErr := output.rollbackTransaction(label)
 				if rollbackErr != nil {
@@ -295,15 +370,13 @@ func (output *StarrocksOutput) Flush(force bool) (map[string]string, error) {
 				return nil, err
 			}
 		}
-
 		// if err := output.prepareTransaction(label); err != nil {
 		// 	rollbackErr := output.rollbackTransaction(label)
 		// 	if rollbackErr != nil {
-		// 		return "", fmt.Errorf("%w; rollback error: %v", err, rollbackErr)
+		// 		return nil, fmt.Errorf("%w; rollback error: %v", err, rollbackErr)
 		// 	}
-		// 	return "", err
+		// 	return nil, err
 		// }
-
 		if err := output.commitTransaction(label); err != nil {
 			log.Printf("[txn] label=%s count=%d status=FAIL step=commit reason=%v", label, count, err)
 			rollbackErr := output.rollbackTransaction(label)
@@ -312,8 +385,7 @@ func (output *StarrocksOutput) Flush(force bool) (map[string]string, error) {
 			}
 			return nil, err
 		}
-
-		log.Printf("[txn] label=%s event=%s count=%d status=SUCCESS", label, events[0].SourceTable, count)
+		log.Printf("[txn] label=%s event=%s count=%d ;action=%s status=end", label, events[0].SourceTable, count, action)
 	}
 
 	// 清空缓冲

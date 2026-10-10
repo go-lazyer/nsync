@@ -32,6 +32,15 @@ func (e *Event) ToBeforeMap() map[string]any {
 	}
 	return beforeMap
 }
+
+func (e *Event) ToBeforePkeyMap() map[string]any {
+	beforeMap := make(map[string]any)
+	for _, i := range e.ColumnPkeys {
+		beforeMap[e.Columns[i]] = e.BeforeRow[i]
+	}
+	return beforeMap
+}
+
 func (e *Event) ToAfterMap() map[string]any {
 	afterMap := make(map[string]any)
 	for i, col := range e.Columns {

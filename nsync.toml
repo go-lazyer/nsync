@@ -46,8 +46,8 @@ apikey = "******"
 batch_size = 1000
 
 [output.starrocks]
-host = "localhost"
-port = 8040
+fe_host = "localhost"
+fe_http_port = 8030
 username = "root"
 password = "******"
 database = "daowei"
